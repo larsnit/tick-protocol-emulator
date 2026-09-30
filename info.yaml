@@ -1,0 +1,45 @@
+# Tiny Tapeout project information
+project:
+  title:        "Tick Protocol Emulator"
+  author:       "Lars Nitschke"
+  discord:      ""
+  description:  "Programmable protocol emulator with deadline/tick timing (Jane Street competition)"
+  language:     "SystemVerilog"
+  clock_hz:     50000000
+
+  # Jane Street protocol-emulator allocation (competition post, confirmed 6x4).
+  tiles: "6x4"
+
+  top_module:  "tt_um_larsnitschke_tick"
+
+  source_files:
+    - "tick_core.sv"
+    - "tt_um_larsnitschke_tick.sv"
+
+pinout:
+  ui[0]: "HOST_WR"
+  ui[1]: "HOST_RD"
+  ui[2]: "IMEM_WE"
+  ui[3]: "RUN"
+  ui[4]: "CMD0"
+  ui[5]: "CMD1"
+  ui[6]: "CMD2"
+  ui[7]: "CMD3"
+  uo[0]: "HOST_RDATA0"
+  uo[1]: "HOST_FULL"
+  uo[2]: "HOST_EMPTY"
+  uo[3]: "WAITING"
+  uo[4]: "MISS"
+  uo[5]: "TICK"
+  uo[6]: "PIN0_MIRROR"
+  uo[7]: ""
+  uio[0]: "LP0_TX"
+  uio[1]: "LOAD1"
+  uio[2]: "LOAD2"
+  uio[3]: "LOAD3"
+  uio[4]: "LOAD4"
+  uio[5]: "LOAD5"
+  uio[6]: "LOAD6"
+  uio[7]: "LOAD7"
+
+yaml_version: 6
