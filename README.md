@@ -9,19 +9,20 @@ PIO and from close deadline-based competitors
 ([survey](docs/competitor-survey.md)).
 
 - Competition: https://blog.janestreet.com/protocol-emulator-asic-competition/
-- ISA (frozen v0.1): [docs/isa.md](docs/isa.md)
+- ISA (living v0.1): [docs/isa.md](docs/isa.md)
 - Project brief: [PROJECT.md](PROJECT.md)
 - Verification: [docs/verification-report.md](docs/verification-report.md)
+- Pin plan: [docs/pin-plan.md](docs/pin-plan.md)
 
 ## Status
 
 | Item | State |
 |---|---|
-| Python ISS + assembler | done — UART/SPI/I2C programs assemble; property tests pass |
-| `tick_core` RTL (1 context) | done — cocotb UART TX 8N1 pass |
+| Python ISS + assembler | done — UART/SPI/I2C/WS2812; W1–W11 property tests |
+| `tick_core` RTL (1 context) | done — cocotb UART TX + lockstep + queue sweep |
 | Yosys cell count | ~6.4k generic cells (headroom on 6x4) |
-| Formal SVA / SymbiYosys | reset proof PASS (`sby -f formal/tick.sby`) |
-| 2nd context, host SPI, LCU | next |
+| Formal SVA / SymbiYosys | queue invariant PASS (`sby -f formal/tick.sby`) |
+| Engine CLK / 2nd context / host SPI | next (ISS has clk_en; RTL port open) |
 
 ## Layout
 

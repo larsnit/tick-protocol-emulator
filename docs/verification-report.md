@@ -1,6 +1,6 @@
 # Verification report — Tick Protocol Emulator
 
-*As of 29 September 2026.*
+*As of 30 September 2026 (review brief W1–W12).*
 
 ## What was proved / checked
 
@@ -8,39 +8,43 @@
 |---|---|---|
 | Assembler matches encoding table | unit tests | pass |
 | Tick spacing = integer PER | ISS `test_tick_spacing_integer_period` | pass |
-| k-th timed op on k-th tick (path padding) | ISS headline test | pass |
+| k-th timed op on k-th tick (padding + branching) | ISS W7 | pass |
+| Late post → MISS | ISS W7 | pass |
 | MISS ⟺ empty queue while timer runs | ISS | pass |
 | Stopped timer + empty FIFO is idle | ISS | pass |
 | Trap cancels engine | ISS | pass |
-| UART TX 8N1 framing (0x55 / 0xA5) | ISS + cocotb RTL | pass |
-| SPI target default / under flag | ISS smoke | pass |
-| SVA tick/miss properties | SymbiYosys project in `formal/` | reset hygiene **PASS** (k-induction); MISS/tick spacing proven on ISS; deeper RTL asserts deferred |
-| Random legal programs do not crash ISS | `scripts/fuzz_iss.py` (50 trials) | pass |
+| UART TX 8N1 + back-to-back (ctx1 disabled) | ISS W1 + cocotb | pass |
+| WAIT-with-tick is timed (no stop-bit MISS hole) | ISS W3 | pass |
+| MFS RX → C := result[8] | ISS W4 | pass |
+| Queue post-tick / order sweep | cocotb W2 | pass |
+| ISS↔RTL cycle lockstep (UART TX) | cocotb W5 | pass |
+| RTL-subset fuzzer | `scripts/fuzz_lockstep_subset.py` | 200/200 |
+| Queue invariant (pending⇒active) | SymbiYosys W6 | **PASS** (k-induction) |
+| I2C target address ACK | ISS W11 | pass |
+| WS2812 MSB-first 2/1 timing | ISS W11 | pass |
+| XFER out≤8; clk_en two ticks/bit | ISS W9/W8 | pass |
 
 ## RTL vs ISS
 
-- RTL `tick_core` is a **single-context** subset (no second SM, no trap/IRQ yet).
-- cocotb UART TX uses the same assembled image as the ISS and checks mid-bit samples.
-- Full cycle-by-cycle PC lockstep is deferred until the second context and host SPI
-  shim land; pin-level agreement on UART TX is the current gate.
+- RTL `tick_core` is still a **single-context** subset (no second SM, no full traps).
+- Named lockstep Δ = 1 cycle after `run` (see `test/test_lockstep.py`).
+- Engine clock (`clk_en` / CPHA) is ISS-first; RTL still single-tick/bit until ported.
+- Do **not** claim full ISS↔RTL agreement beyond the UART lockstep + fuzzer subset.
+
+## Formal note
+
+Earlier reset-only PASS was vacuous (`run=0`). The rebuilt wrapper drives free inputs
+and proves the queue invariant after the W2 post-tick fix.
 
 ## Yosys cell count (generic techmap, not PDK)
 
 ~6.4k cells for `tt_um_larsnitschke_tick` including FF instruction memory — under
 the ~25k 6x4 budget with headroom for a second context and line coding.
 
-## AI assistance note
-
-The ISS, assembler, RTL, and tests were developed with AI assistance. Wrong outputs
-caught in review included: WAIT consuming ticks that belonged to `XFER` (fixed to
-match the draft), and a headline-property test that posted the second `SET.T` too
-late (test fixed; hardware semantics unchanged). RP2040 errata (findings §5) motivate
-keeping timing claims as properties rather than eyeballing waveforms.
-
 ## Still open before submission
 
 - Second context + time-multiplex scheduler
-- Host SPI target on `ui`/`uo`
-- Local LibreLane harden (Docker) + slow-corner STA
-- SymbiYosys run in CI
-- I2C target stretch policy in RTL
+- Port W8 two-tick clock engine to RTL; rewrite SPI/I2C controller programs
+- Host SPI target shim on `ui`/`uo` (pin plan ready)
+- Local LibreLane harden + slow-corner STA
+- SymbiYosys in CI; stronger timer-accumulator induction
