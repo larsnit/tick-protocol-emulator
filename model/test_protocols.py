@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from model import EventKind, Machine, PinMode, TickSource, assemble
+from model.check_uart import decode_uart_frame, falling_edges
 
 
 def _uart_tx_cfg(per: float = 8.0):
@@ -201,3 +202,77 @@ def test_spi_target_default_0xff():
         m.step()
     # Program should be in loop; under flag set from PULL.NB
     assert m.ctx[0].under or m.ctx[0].pc >= 0
+
+
+def test_ws2812_msb_first_timing():
+    """W11: WS2812 encodes MSB first with 2/1 vs 1/2 high/low tick ratios."""
+    from model.check_ws2812 import decode_ws2812_byte
+
+    per = 4
+    img = assemble((ROOT / "programs" / "ws2812.asm").read_text())
+    m = Machine()
+    m.load(
+        img,
+        [
+            {
+                "per": float(per),
+                "phase": 0,
+                "msb_first": True,
+                "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 0}],
+                "events": [{"kind": EventKind.HOST_DATA}],
+            }
+        ],
+    )
+    m.host_push(0xA5, last=True)  # 10100101
+    trace = []
+    for _ in range(400):
+        m.step()
+        cur = m.phys_drive[0] if m.phys_oe[0] else 0
+        trace.append(cur)
+    assert decode_ws2812_byte(trace, per) == 0xA5
+    assert not m.ctx[0].miss
+
+
+def test_i2c_target_address_ack():
+    """W11: I2C target ACKs matching address 0x28 write."""
+    from model.check_i2c import i2c_clock_byte_msb, i2c_idle, i2c_start
+
+    img = assemble((ROOT / "programs" / "i2c_target.asm").read_text())
+    m = Machine()
+    m.load(
+        img,
+        [
+            {
+                "tick_source": TickSource.PIN_EDGE,
+                "tick_pin": 1,
+                "tick_on_rise": True,
+                "msb_first": True,
+                "miss_policy": 3,  # STRETCH
+                "pins": [
+                    {"physical": 0, "mode": PinMode.OPENDRAIN, "idle": 1},  # SDA
+                    {"physical": 1, "mode": PinMode.OPENDRAIN, "idle": 1},  # SCL
+                ],
+                "events": [
+                    {
+                        "kind": EventKind.QUAL_FALL_WHILE_HIGH,
+                        "pin": 0,
+                        "qual_pin": 1,
+                    },
+                    {
+                        "kind": EventKind.QUAL_RISE_WHILE_HIGH,
+                        "pin": 0,
+                        "qual_pin": 1,
+                        "trap": True,
+                        "vector": 0,
+                    },
+                ],
+            }
+        ],
+    )
+    i2c_idle(m, 8)
+    i2c_start(m)
+    # Allow WAIT to complete after sync
+    for _ in range(8):
+        m.step()
+    ack = i2c_clock_byte_msb(m, 0x50, sample_ack=True)
+    assert ack == 0, f"expected ACK, got NACK (pc={m.ctx[0].pc} miss={m.ctx[0].miss})"

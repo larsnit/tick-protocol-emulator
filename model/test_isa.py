@@ -28,6 +28,7 @@ def test_assemble_all_programs():
         "spi_controller.asm",
         "i2c_controller.asm",
         "i2c_target.asm",
+        "ws2812.asm",
     ):
         words = assemble((ROOT / "programs" / name).read_text())
         assert 1 <= len(words) <= 64, name
