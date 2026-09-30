@@ -67,12 +67,14 @@ class Job:
 
 @dataclass
 class TimedOp:
-    kind: str  # set | xfer | in
+    kind: str  # set | xfer | in | wait
     mask: int = 0
     val: int = 0
     oe: bool = False
     job: Optional[Job] = None
     lp: int = 0
+    wait_mask: int = 0
+    wait_tc: int = 0
 
 
 @dataclass
@@ -362,6 +364,48 @@ class Machine:
                     c.result = op.job.result
                 c.result_valid = True
                 self._promote(c)
+        elif op.kind == "wait":
+            c.evf = 1 << 4
+            c.waiting = False
+            if op.wait_tc == WaitTc.REARM:
+                self._start_timer(c)
+            elif op.wait_tc in (WaitTc.STOP, WaitTc.IDLE):
+                self._stop_timer(c)
+            self._promote(c)
+
+    def _apply_wait_tc(self, c: Context, tc: int) -> None:
+        if tc == WaitTc.REARM:
+            self._start_timer(c)
+        elif tc in (WaitTc.STOP, WaitTc.IDLE):
+            self._stop_timer(c)
+
+    def _try_event_complete_wait(self, c: Context) -> bool:
+        """Event-first dequeue of a timed WAIT (non-tick events)."""
+        if not c.waiting or c.pull_block is not None or c.mfs_rx is not None:
+            return False
+        where = None
+        op = None
+        if c.timed_active is not None and c.timed_active.kind == "wait":
+            where, op = "a", c.timed_active
+        elif c.timed_pending is not None and c.timed_pending.kind == "wait":
+            where, op = "p", c.timed_pending
+        if op is None:
+            return False
+        fired = 0
+        ev_now = self._event_mask_now(c)
+        for ei in range(N_EVENTS):
+            if (op.wait_mask & (1 << ei)) and (ev_now & (1 << ei)):
+                fired |= 1 << ei
+        if not fired:
+            return False
+        if where == "a":
+            self._promote(c)
+        else:
+            c.timed_pending = None
+        c.evf = fired
+        c.waiting = False
+        self._apply_wait_tc(c, op.wait_tc)
+        return True
 
     def _apply_miss(self, c: Context) -> None:
         if c.miss_policy == MissPolicy.FLAG:
@@ -505,8 +549,16 @@ class Machine:
             tc = d["tc"]
             if tc in (WaitTc.REARM, WaitTc.IDLE):
                 self._stop_timer(c)
+            mask = d["evmask"]
+            if mask & (1 << 4):
+                # Timed WAIT: occupies a queue slot (draft rule 2).
+                self._ensure_timer_for_timed(c)
+                if not self._post_timed(
+                    c, TimedOp("wait", wait_mask=mask, wait_tc=tc)
+                ):
+                    return
             c.waiting = True
-            c.wait_mask = d["evmask"]
+            c.wait_mask = mask
             c.wait_tc = tc
             c.pc = next_pc
             return
@@ -653,8 +705,7 @@ class Machine:
             if not c.result_valid:
                 return None
             c.result_valid = False
-            if c.result > 0xFF:
-                c.c = bool((c.result >> 8) & 1)
+            c.c = bool((c.result >> 8) & 1)
             return c.result & 0xFF
         if spr == Spr.RXH:
             return (c.result >> 8) & 0xFF
@@ -724,6 +775,11 @@ class Machine:
             return
         if not c.waiting:
             return
+        # Timed WAIT (kind=wait) completes in _on_tick / _try_event_complete_wait.
+        if c.timed_active and c.timed_active.kind == "wait":
+            return
+        if c.timed_pending and c.timed_pending.kind == "wait":
+            return
         # IN.T completes in _on_tick
         if c.timed_active and c.timed_active.kind == "in":
             return
@@ -732,18 +788,14 @@ class Machine:
         for ei in range(N_EVENTS):
             if (c.wait_mask & (1 << ei)) and (ev_now & (1 << ei)):
                 fired |= 1 << ei
-        if (c.wait_mask & (1 << 4)) and tick:
-            fired |= 1 << 4
+        # Soft WAIT never includes tick; tick-bearing WAIT is a timed op.
         if c.wait_mask == 0:
             return
         if not fired:
             return
         c.evf = fired
         c.waiting = False
-        if c.wait_tc == WaitTc.REARM:
-            self._start_timer(c)
-        elif c.wait_tc in (WaitTc.STOP, WaitTc.IDLE):
-            self._stop_timer(c)
+        self._apply_wait_tc(c, c.wait_tc)
 
     def _check_traps(self, c: Context) -> None:
         for ei, e in enumerate(c.events):
@@ -778,11 +830,12 @@ class Machine:
         for ci, c in enumerate(self.ctx):
             if not c.enabled:
                 continue
-            had_timed = c.timed_active is not None
+            # Event-first: dequeue timed WAIT on non-tick events before the tick.
+            self._try_event_complete_wait(c)
             if ticks[ci]:
                 self._on_tick(c)
-            # A WAIT on TICK only completes on a tick that did not feed a timed op.
-            self._service_waits(c, ticks[ci] and not had_timed)
+            # Soft event waits / PULL / MFS (tick-bearing WAIT handled above).
+            self._service_waits(c, False)
 
         for _ in range(N_CONTEXTS):
             ci = self.sched

@@ -237,3 +237,94 @@ def test_trap_cancels_engine():
     for _ in range(6):
         m.step()
     assert c.timed_active is None
+
+
+def test_wait_tick_is_timed_op_no_miss_after_stop():
+    """W3: WAIT tick occupies a queue slot; stop-bit WAIT consumes its tick (no MISS)."""
+    src = """
+        SET.T tx=0
+        SET.T tx=1
+        WAIT  tick, stop
+        hang: JMP AL, hang
+    """
+    per = 8.0
+    edges, m = _run_edges(src, per=per, cycles=80)
+    assert len(edges) == 2
+    assert edges[1][0] - edges[0][0] == int(per)
+    # After the WAIT consumes the tick following the second SET, timer is stopped.
+    assert not m.ctx[0].timer_running
+    assert not m.ctx[0].miss
+    assert m.ctx[0].evf & 0x10
+
+
+def test_wait_tick_between_sets_takes_middle_tick():
+    """W3: SET.T; WAIT tick; SET.T — three timed ops on three consecutive ticks."""
+    src = """
+        SET.T tx=0
+        WAIT  tick
+        SET.T tx=1
+        hang: JMP AL, hang
+    """
+    per = 8.0
+    edges, m = _run_edges(src, per=per, cycles=80)
+    assert len(edges) == 2
+    # Middle WAIT consumed a tick, so edges are 2*PER apart.
+    assert edges[1][0] - edges[0][0] == 2 * int(per), edges
+
+
+def test_wait_timeout_event_first():
+    """W3: WAIT ev0|tick — host data before timeout dequeues wait; no MISS on that tick."""
+    src = """
+        WAIT  ev0|tick, stop
+        LDI   r0, 0xA5
+        hang: JMP AL, hang
+    """
+    m = Machine()
+    m.load(
+        assemble(src),
+        [
+            {
+                "per": 8.0,
+                "phase": 0,
+                "tick_source": TickSource.TIMER,
+                "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
+                "events": [{"kind": EventKind.HOST_DATA}],
+            }
+        ],
+    )
+    c = m.ctx[0]
+    # Let WAIT post and timer start; push host data before first tick.
+    for _ in range(3):
+        m.step()
+    assert c.waiting
+    assert c.timed_active is not None and c.timed_active.kind == "wait"
+    m.host_push(0x11)
+    for _ in range(4):
+        m.step()
+        if not c.waiting:
+            break
+    assert not c.waiting
+    assert c.regs[0] == 0xA5
+    assert c.evf & 0x01
+    assert not (c.evf & 0x10)
+
+
+def test_mfs_rx_always_sets_c_from_bit8():
+    """W4: MFS RX always does C := result[8], even when high bits are zero."""
+    m = Machine()
+    m.load(assemble("hang: JMP AL, hang\n"), [{"per": 8.0}])
+    c = m.ctx[0]
+    c.result = 0x0055
+    c.result_valid = True
+    c.c = True  # sticky wrong value must be overwritten
+    from model.opcodes import Spr
+
+    val = m._read_spr(c, Spr.RX)
+    assert val == 0x55
+    assert c.c is False
+
+    c.result = 0x0155
+    c.result_valid = True
+    val = m._read_spr(c, Spr.RX)
+    assert val == 0x55
+    assert c.c is True

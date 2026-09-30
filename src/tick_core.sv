@@ -61,7 +61,7 @@ module tick_core (
   reg [15:0] time_cnt;
   reg tick;
 
-  reg [1:0] a_kind, p_kind; // 0 empty 1 set 2 xfer
+  reg [1:0] a_kind, p_kind; // 0 empty 1 set 2 xfer 3 wait
   reg a_oe, p_oe;
   reg [3:0] a_mask, p_mask, a_val, p_val;
   reg [1:0] a_mode, p_mode;
@@ -167,6 +167,26 @@ module tick_core (
         a_done_n = a_done; a_res_n = a_res;
         xfer_done = 1'b0;
 
+        // Event-first: dequeue timed WAIT on host-data (EV0) before tick consume.
+        if (waiting_n && !pull_block && !mfs_block &&
+            (a_k == 2'd3 || p_k == 2'd3) && wait_mask[0] && host_data) begin
+          if (a_k == 2'd3) begin
+            a_k = p_k;
+            a_oe_n = p_oe_n; a_mask_n = p_mask_n; a_val_n = p_val_n;
+            a_mode_n = p_mode_n; a_nm1_n = p_nm1_n; a_data_n = p_data_n; a_msb_n = p_msb_n;
+            a_done_n = 4'd0; a_res_n = 16'h0;
+            p_k = 2'd0;
+          end else begin
+            p_k = 2'd0;
+          end
+          waiting_n = 1'b0;
+          if (wait_tc == 2'b01) begin
+            timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+          end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
+            timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
+          end
+        end
+
         if (do_tick) begin
           if (a_k == 2'd0) begin
             if (timer_run) miss <= 1'b1;
@@ -206,6 +226,19 @@ module tick_core (
             end else begin
               a_done_n = a_done_n + 4'd1;
             end
+          end else if (a_k == 2'd3) begin
+            // Timed WAIT consumes this tick (EVF.TICK); apply tc.
+            waiting_n = 1'b0;
+            if (wait_tc == 2'b01) begin
+              timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+            end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
+              timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
+            end
+            a_k = p_k;
+            a_oe_n = p_oe_n; a_mask_n = p_mask_n; a_val_n = p_val_n;
+            a_mode_n = p_mode_n; a_nm1_n = p_nm1_n; a_data_n = p_data_n; a_msb_n = p_msb_n;
+            a_done_n = 4'd0; a_res_n = 16'h0;
+            p_k = 2'd0;
           end
         end
 
@@ -229,10 +262,10 @@ module tick_core (
             mfs_block <= 1'b0;
             waiting_n = 1'b0;
           end else begin
+            // Soft WAIT (events only; tick-bearing WAIT is kind=3 timed op).
             take = 1'b0;
             if (wait_mask[0] && host_data) take = 1'b1;
-            if (wait_mask[4] && do_tick && !had_timed) take = 1'b1;
-            if (wait_mask != 5'h0 && take) begin
+            if (wait_mask != 5'h0 && take && a_k != 2'd3 && p_k != 2'd3) begin
               waiting_n = 1'b0;
               if (wait_tc == 2'b01) begin
                 timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
@@ -281,13 +314,26 @@ module tick_core (
               end
             end
             4'b0010: begin // WAIT
-              waiting_n = 1'b1;
               wait_mask <= instr[9:5];
               wait_tc <= instr[11:10];
               if (instr[11:10] == 2'b01 || instr[11:10] == 2'b11) begin
                 timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
               end
-              issued = 1'b1;
+              if (instr[9]) begin
+                // Tick bit set → post timed WAIT (kind=3)
+                if (slots_full_n) stalled = 1'b1;
+                else begin
+                  // Ensure timer for timed WAIT (may restart after rearm/idle stop).
+                  timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+                  do_post = 1'b1;
+                  post_kind = 2'd3;
+                  waiting_n = 1'b1;
+                  issued = 1'b1;
+                end
+              end else begin
+                waiting_n = 1'b1;
+                issued = 1'b1;
+              end
             end
             4'b0011: begin // JMP
               take = 1'b0;

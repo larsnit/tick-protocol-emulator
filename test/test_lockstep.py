@@ -71,9 +71,17 @@ async def lockstep_uart_tx(dut):
         rtl_wait = int(core.waiting.value)
         iss_wait = int(iss.ctx[0].waiting)
         rtl_ak = int(core.a_kind.value)
-        iss_ak = 0 if iss.ctx[0].timed_active is None else (
-            1 if iss.ctx[0].timed_active.kind == "set" else 2
-        )
+        ta = iss.ctx[0].timed_active
+        if ta is None:
+            iss_ak = 0
+        elif ta.kind == "set":
+            iss_ak = 1
+        elif ta.kind == "xfer":
+            iss_ak = 2
+        elif ta.kind == "wait":
+            iss_ak = 3
+        else:
+            iss_ak = 2  # in.t maps near xfer for subset
 
         if (rtl_pc, rtl_pin, rtl_miss, rtl_wait, rtl_ak) != (
             iss_pc,
