@@ -48,8 +48,14 @@ MTS   1010 ss rrrr ------
 1011–1111  reserved
 ```
 
+`MFS RX` always sets `C := result[8]` (both the ready path and the blocking
+resume path), so UART RX stop/parity bits are visible without a second read.
+
 Opcodes, jump conditions, special registers, and WAIT `tc` field match the draft
 §3. Single source of truth in software: `model/opcodes.py`.
+
+Timed operations that consume ticks in program order: `SET.T`, `IN.T`, each
+`XFER` bit, and a `WAIT` whose event mask includes `tick` (queue kind = wait).
 
 ## Headlined properties
 
