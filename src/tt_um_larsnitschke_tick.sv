@@ -113,7 +113,8 @@ module tt_um_larsnitschke_tick (
       .dbg_miss(dbg_miss),
       .dbg_tick(dbg_tick),
       .dbg_timer_run(),
-      .dbg_a_kind()
+      .dbg_a_kind(),
+      .dbg_p_kind()
   );
 
   assign uo_out = {1'b0, pin0_out, dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]};

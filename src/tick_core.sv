@@ -2,6 +2,7 @@
 
 // Tick protocol-emulator core — single context (time-multiplex of 2 deferred).
 // Encoding matches model/opcodes.py. Cycle order: timer → engine → waits → issue.
+// W2: queue posts are placed into the *post-tick* occupancy (ISS order).
 
 module tick_core (
     input  wire        clk,
@@ -27,7 +28,8 @@ module tick_core (
     output wire        dbg_miss,
     output wire        dbg_tick,
     output wire        dbg_timer_run,
-    output wire [1:0]  dbg_a_kind
+    output wire [1:0]  dbg_a_kind,
+    output wire [1:0]  dbg_p_kind
 );
   reg [15:0] imem [0:63];
   integer ii;
@@ -71,19 +73,16 @@ module tick_core (
   reg res_valid;
   reg [15:0] result;
 
-  // Snapshot for tick/engine before kind updates (WAIT must not steal timed ticks)
-  reg [1:0] a_kind_before;
-
   assign dbg_pc = pc;
   assign dbg_waiting = waiting;
   assign dbg_miss = miss;
   assign dbg_tick = tick;
   assign dbg_timer_run = timer_run;
   assign dbg_a_kind = a_kind;
+  assign dbg_p_kind = p_kind;
 
   wire [15:0] instr = imem[pc];
   wire [3:0] op = instr[15:12];
-  wire slots_full = (a_kind != 2'd0) && (p_kind != 2'd0);
   wire host_data = !tx_empty;
 
   always @(posedge clk or negedge rst_n) begin : main
@@ -97,6 +96,24 @@ module tick_core (
     reg [5:0] next_pc;
     reg stalled;
     reg had_timed;
+    // Post-tick queue occupancy (blocking)
+    reg [1:0] a_k, p_k;
+    reg        a_oe_n, p_oe_n, a_msb_n, p_msb_n;
+    reg [3:0]  a_mask_n, p_mask_n, a_val_n, p_val_n;
+    reg [1:0]  a_mode_n, p_mode_n;
+    reg [3:0]  a_nm1_n, p_nm1_n, a_done_n;
+    reg [7:0]  a_data_n, p_data_n;
+    reg [15:0] a_res_n;
+    reg        slots_full_n;
+    reg        xfer_done;
+    reg        do_post;
+    reg [1:0]  post_kind;
+    reg        post_oe;
+    reg [3:0]  post_mask, post_val, post_nm1;
+    reg [1:0]  post_mode;
+    reg [7:0]  post_data;
+    reg        post_msb;
+    reg        waiting_n;
 
     if (!rst_n) begin
       for (ii = 0; ii < 64; ii = ii + 1) imem[ii] <= 16'h0;
@@ -136,51 +153,65 @@ module tick_core (
         end
         tick <= do_tick;
         had_timed = (a_kind != 2'd0);
-        a_kind_before = a_kind;
+        waiting_n = waiting;
+
+        // Snapshot queue into blocking next-state
+        a_k = a_kind; p_k = p_kind;
+        a_oe_n = a_oe; p_oe_n = p_oe;
+        a_mask_n = a_mask; p_mask_n = p_mask;
+        a_val_n = a_val; p_val_n = p_val;
+        a_mode_n = a_mode; p_mode_n = p_mode;
+        a_nm1_n = a_nm1; p_nm1_n = p_nm1;
+        a_data_n = a_data; p_data_n = p_data;
+        a_msb_n = a_msb; p_msb_n = p_msb;
+        a_done_n = a_done; a_res_n = a_res;
+        xfer_done = 1'b0;
 
         if (do_tick) begin
-          if (a_kind == 2'd0) begin
+          if (a_k == 2'd0) begin
             if (timer_run) miss <= 1'b1;
-          end else if (a_kind == 2'd1) begin
-            if (a_mask[0]) begin
-              if (a_oe) pin0_oe <= a_val[0];
-              else begin pin0_out <= a_val[0]; pin0_oe <= 1'b1; end
+          end else if (a_k == 2'd1) begin
+            if (a_mask_n[0]) begin
+              if (a_oe_n) pin0_oe <= a_val_n[0];
+              else begin pin0_out <= a_val_n[0]; pin0_oe <= 1'b1; end
             end
-            a_kind <= p_kind;
-            a_oe <= p_oe; a_mask <= p_mask; a_val <= p_val;
-            a_mode <= p_mode; a_nm1 <= p_nm1; a_data <= p_data; a_msb <= p_msb;
-            a_done <= 4'd0; a_res <= 16'h0;
-            p_kind <= 2'd0;
-          end else if (a_kind == 2'd2) begin
-            rem = a_nm1 + 4'd1 - a_done;
-            sh = a_msb ? (rem - 4'd1) : a_done;
-            outb = a_data[sh[2:0]];
-            if (a_mode == 2'd0 || a_mode == 2'd2) begin
+            // promote pending → active
+            a_k = p_k;
+            a_oe_n = p_oe_n; a_mask_n = p_mask_n; a_val_n = p_val_n;
+            a_mode_n = p_mode_n; a_nm1_n = p_nm1_n; a_data_n = p_data_n; a_msb_n = p_msb_n;
+            a_done_n = 4'd0; a_res_n = 16'h0;
+            p_k = 2'd0;
+          end else if (a_k == 2'd2) begin
+            rem = a_nm1_n + 4'd1 - a_done_n;
+            sh = a_msb_n ? (rem - 4'd1) : a_done_n;
+            outb = a_data_n[sh[2:0]];
+            if (a_mode_n == 2'd0 || a_mode_n == 2'd2) begin
               pin0_out <= outb;
               pin0_oe <= 1'b1;
             end
-            if (a_mode == 2'd1 || a_mode == 2'd2) begin
-              if (a_msb) a_res <= {a_res[14:0], pin0_in};
-              else a_res[a_done] <= pin0_in;
+            if (a_mode_n == 2'd1 || a_mode_n == 2'd2) begin
+              if (a_msb_n) a_res_n = {a_res_n[14:0], pin0_in};
+              else a_res_n[a_done_n] = pin0_in;
             end
-            if (a_done == a_nm1) begin
-              if (a_mode == 2'd0) result <= {8'h0, a_data};
-              else if (a_msb) result <= {a_res[14:0], pin0_in};
-              else begin
-                result <= a_res;
-                result[a_done] <= pin0_in;
-              end
+            if (a_done_n == a_nm1_n) begin
+              xfer_done = 1'b1;
+              if (a_mode_n == 2'd0) result <= {8'h0, a_data_n};
+              else result <= a_res_n;
               res_valid <= 1'b1;
-              a_kind <= p_kind;
-              a_oe <= p_oe; a_mask <= p_mask; a_val <= p_val;
-              a_mode <= p_mode; a_nm1 <= p_nm1; a_data <= p_data; a_msb <= p_msb;
-              a_done <= 4'd0; a_res <= 16'h0;
-              p_kind <= 2'd0;
-            end else a_done <= a_done + 4'd1;
+              a_k = p_k;
+              a_oe_n = p_oe_n; a_mask_n = p_mask_n; a_val_n = p_val_n;
+              a_mode_n = p_mode_n; a_nm1_n = p_nm1_n; a_data_n = p_data_n; a_msb_n = p_msb_n;
+              a_done_n = 4'd0; a_res_n = 16'h0;
+              p_k = 2'd0;
+            end else begin
+              a_done_n = a_done_n + 4'd1;
+            end
           end
         end
 
-        if (waiting) begin
+        slots_full_n = (a_k != 2'd0) && (p_k != 2'd0);
+
+        if (waiting_n) begin
           if (pull_block && !tx_empty) begin
             tmp = txfifo[tx_r][7:0];
             rf[pull_rd] <= tmp;
@@ -189,20 +220,20 @@ module tick_core (
             z <= (tmp == 8'h0);
             tx_r <= tx_r + 3'd1;
             pull_block <= 1'b0;
-            waiting <= 1'b0;
+            waiting_n = 1'b0;
           end else if (mfs_block && res_valid) begin
             rf[mfs_rd] <= result[7:0];
-            if (result[15:8] != 8'h0) c <= result[8];
+            c <= result[8];
             z <= (result[7:0] == 8'h0);
             res_valid <= 1'b0;
             mfs_block <= 1'b0;
-            waiting <= 1'b0;
+            waiting_n = 1'b0;
           end else begin
             take = 1'b0;
             if (wait_mask[0] && host_data) take = 1'b1;
             if (wait_mask[4] && do_tick && !had_timed) take = 1'b1;
             if (wait_mask != 5'h0 && take) begin
-              waiting <= 1'b0;
+              waiting_n = 1'b0;
               if (wait_tc == 2'b01) begin
                 timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
               end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
@@ -215,20 +246,30 @@ module tick_core (
         issued = 1'b0;
         stalled = 1'b0;
         next_pc = pc + 6'd1;
-        if (!waiting) begin
+        do_post = 1'b0;
+        post_kind = 2'd0;
+        post_oe = 1'b0;
+        post_mask = 4'h0;
+        post_val = 4'h0;
+        post_mode = 2'd0;
+        post_nm1 = 4'd0;
+        post_data = 8'h0;
+        post_msb = cfg_msb_first;
+
+        if (!waiting_n) begin
           case (op)
             4'b0000: begin // SET
               if (instr[11]) begin
-                if (slots_full) stalled = 1'b1;
+                if (slots_full_n) stalled = 1'b1;
                 else begin
                   if (!timer_run) begin
                     timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
                   end
-                  if (a_kind == 2'd0) begin
-                    a_kind <= 2'd1; a_oe <= instr[10]; a_mask <= instr[9:6]; a_val <= instr[5:2];
-                  end else begin
-                    p_kind <= 2'd1; p_oe <= instr[10]; p_mask <= instr[9:6]; p_val <= instr[5:2];
-                  end
+                  do_post = 1'b1;
+                  post_kind = 2'd1;
+                  post_oe = instr[10];
+                  post_mask = instr[9:6];
+                  post_val = instr[5:2];
                   issued = 1'b1;
                 end
               end else begin
@@ -240,7 +281,7 @@ module tick_core (
               end
             end
             4'b0010: begin // WAIT
-              waiting <= 1'b1;
+              waiting_n = 1'b1;
               wait_mask <= instr[9:5];
               wait_tc <= instr[11:10];
               if (instr[11:10] == 2'b01 || instr[11:10] == 2'b11) begin
@@ -290,24 +331,17 @@ module tick_core (
               issued = 1'b1;
             end
             4'b0110: begin // XFER
-              if (slots_full) stalled = 1'b1;
+              if (slots_full_n) stalled = 1'b1;
               else begin
                 if (!timer_run) begin
                   timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
                 end
-                if (a_kind == 2'd0) begin
-                  a_kind <= 2'd2;
-                  a_mode <= instr[5:4];
-                  a_nm1 <= instr[9:6];
-                  a_data <= rf[instr[11:10]];
-                  a_done <= 4'd0; a_res <= 16'h0; a_msb <= cfg_msb_first;
-                end else begin
-                  p_kind <= 2'd2;
-                  p_mode <= instr[5:4];
-                  p_nm1 <= instr[9:6];
-                  p_data <= rf[instr[11:10]];
-                  p_msb <= cfg_msb_first;
-                end
+                do_post = 1'b1;
+                post_kind = 2'd2;
+                post_mode = instr[5:4];
+                post_nm1 = instr[9:6];
+                post_data = rf[instr[11:10]];
+                post_msb = cfg_msb_first;
                 issued = 1'b1;
               end
             end
@@ -318,7 +352,7 @@ module tick_core (
                   last_f <= 1'b0; cmd_f <= 1'b0;
                   issued = 1'b1;
                 end else begin
-                  waiting <= 1'b1;
+                  waiting_n = 1'b1;
                   pull_block <= 1'b1;
                   pull_rd <= instr[11:10];
                   wait_mask <= 5'h0;
@@ -344,19 +378,67 @@ module tick_core (
             4'b1001: begin
               if (instr[9:6] == 4'd0) begin
                 if (!res_valid) begin
-                  waiting <= 1'b1; mfs_block <= 1'b1; mfs_rd <= instr[11:10];
+                  waiting_n = 1'b1; mfs_block <= 1'b1; mfs_rd <= instr[11:10];
                   issued = 1'b1;
                 end else begin
                   rf[instr[11:10]] <= result[7:0];
+                  c <= result[8];
                   res_valid <= 1'b0;
                   issued = 1'b1;
                 end
               end else issued = 1'b1;
             end
+            // MTS subset: PER / PHASE / ECFG / ERR / PC (W12 short-term)
+            4'b1010: begin
+              case (instr[9:6])
+                4'd5: begin // ERR clear-by-1
+                  if (rf[instr[11:10]][0]) miss <= 1'b0;
+                end
+                4'd6: ; // PER_L — host cfg path preferred; stub for programs
+                4'd11: a_msb_n = rf[instr[11:10]][0]; // ECFG bit0 → will need store; use cfg
+                4'd12: next_pc = rf[instr[11:10]][5:0];
+                default: ;
+              endcase
+              issued = 1'b1;
+            end
             default: issued = 1'b1;
           endcase
+
+          if (do_post && !stalled) begin
+            if (a_k == 2'd0) begin
+              a_k = post_kind;
+              if (post_kind == 2'd1) begin
+                a_oe_n = post_oe; a_mask_n = post_mask; a_val_n = post_val;
+              end else begin
+                a_mode_n = post_mode; a_nm1_n = post_nm1; a_data_n = post_data;
+                a_msb_n = post_msb; a_done_n = 4'd0; a_res_n = 16'h0;
+              end
+            end else begin
+              p_k = post_kind;
+              if (post_kind == 2'd1) begin
+                p_oe_n = post_oe; p_mask_n = post_mask; p_val_n = post_val;
+              end else begin
+                p_mode_n = post_mode; p_nm1_n = post_nm1; p_data_n = post_data;
+                p_msb_n = post_msb;
+              end
+            end
+          end
+
           if (issued && !stalled) pc <= next_pc;
         end
+
+        // Commit queue next-state
+        waiting <= waiting_n;
+        a_kind <= a_k;
+        p_kind <= p_k;
+        a_oe <= a_oe_n; p_oe <= p_oe_n;
+        a_mask <= a_mask_n; p_mask <= p_mask_n;
+        a_val <= a_val_n; p_val <= p_val_n;
+        a_mode <= a_mode_n; p_mode <= p_mode_n;
+        a_nm1 <= a_nm1_n; p_nm1 <= p_nm1_n;
+        a_data <= a_data_n; p_data <= p_data_n;
+        a_msb <= a_msb_n; p_msb <= p_msb_n;
+        a_done <= a_done_n; a_res <= a_res_n;
       end
     end
   end
