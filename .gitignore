@@ -18,4 +18,5 @@ model/__pycache__/
 synth/*.v
 *.pyc
 formal/tick_prove/
+formal/tick/
 formal/*.log
