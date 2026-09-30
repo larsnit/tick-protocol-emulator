@@ -56,55 +56,109 @@ def test_tick_spacing_integer_period():
     assert deltas and all(d == 5 for d in deltas), (tick_cycles, deltas)
 
 
-def test_kth_timed_op_on_kth_tick_independent_of_path():
-    """Once both timed ops are posted, intervening NOPs do not move edges."""
-    prog_nop = assemble(
-        """
+def _cfg_pushpull(per: float = 8.0):
+    return {
+        "per": per,
+        "phase": 0,
+        "tick_source": TickSource.TIMER,
+        "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
+    }
+
+
+def _run_edges(src: str, per: float = 8.0, cycles: int = 200):
+    m = Machine()
+    m.load(assemble(src), [_cfg_pushpull(float(per))])
+    edges = []
+    prev = 1
+    for _ in range(cycles):
+        m.step()
+        cur = m.phys_drive[0] if m.phys_oe[0] else 1
+        if cur != prev:
+            edges.append((m.cycle, cur))
+            prev = cur
+    return edges, m
+
+
+def test_kth_timed_op_padding_sweep():
+    """W7: padding between posts must not reorder edges while posts stay ahead of ticks."""
+    per = 8.0
+    # With PER=8, keep k < 7 so the second post lands before the first tick.
+    ref_deltas = None
+    for k in range(0, 7):
+        nops = "\n".join(["ALU MOV r0, r0"] * k)
+        src = f"SET.T tx=0\n{nops}\nSET.T tx=1\nSET.T tx=0\nSET.T tx=1\nhang: JMP AL, hang\n"
+        edges, m = _run_edges(src, per=per)
+        assert len(edges) == 4, (k, edges)
+        assert [e[1] for e in edges] == [0, 1, 0, 1], (k, edges)
+        assert all(b[0] - a[0] == int(per) for a, b in zip(edges, edges[1:])), (k, edges)
+        # Timer may MISS after the burst drains (W3); edges themselves must be clean.
+        deltas = [e[0] - edges[0][0] for e in edges]
+        if ref_deltas is None:
+            ref_deltas = deltas
+        else:
+            assert deltas == ref_deltas, (k, edges, ref_deltas)
+
+
+def test_kth_timed_op_branching_paths():
+    """W7: unequal path lengths into the same timed posts still hit the tick grid."""
+    src_a = """
+        LDI r0, 1
+        JMP NZ, burst
+        ALU MOV r0, r0
+    burst:
         SET.T tx=0
         SET.T tx=1
-        ALU MOV r0, r0
-        ALU MOV r0, r0
-        ALU MOV r0, r0
-        hang: JMP AL, hang
-        """
-    )
-    prog_tight = assemble(
-        """
         SET.T tx=0
         SET.T tx=1
         hang: JMP AL, hang
-        """
-    )
+    """
+    src_b = """
+        LDI r0, 0
+        JMP NZ, burst
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+    burst:
+        SET.T tx=0
+        SET.T tx=1
+        SET.T tx=0
+        SET.T tx=1
+        hang: JMP AL, hang
+    """
+    per = 8.0
+    ea, _ = _run_edges(src_a, per=per)
+    eb, _ = _run_edges(src_b, per=per)
+    assert len(ea) == 4 and len(eb) == 4, (ea, eb)
+    assert [e[1] for e in ea] == [0, 1, 0, 1]
+    assert [e[1] for e in eb] == [0, 1, 0, 1]
+    assert all(b[0] - a[0] == int(per) for a, b in zip(ea, ea[1:]))
+    assert all(b[0] - a[0] == int(per) for a, b in zip(eb, eb[1:]))
 
-    def run_edges(img):
-        m = Machine()
-        m.load(
-            img,
-            [
-                {
-                    "per": 4.0,
-                    "phase": 0,
-                    "tick_source": TickSource.TIMER,
-                    "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
-                }
-            ],
-        )
-        edges = []
-        prev = 1
-        for _ in range(60):
-            m.step()
-            cur = m.phys_drive[0] if m.phys_oe[0] else 1
-            if cur != prev:
-                edges.append((m.cycle, cur))
-                prev = cur
-        return edges
 
-    e1 = run_edges(prog_nop)
-    e2 = run_edges(prog_tight)
-    assert len(e1) >= 2 and len(e2) >= 2, (e1, e2)
-    assert e1[0][0] == e2[0][0]
-    assert e1[1][0] == e2[1][0]
-    assert e1[1][0] - e1[0][0] == 4
+def test_late_post_miss_and_shift():
+    """W7: posting after the tick has passed sets MISS; edge stays on the grid."""
+    src = """
+        SET.T tx=0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        ALU MOV r0, r0
+        SET.T tx=1
+        hang: JMP AL, hang
+    """
+    per = 4.0
+    edges, m = _run_edges(src, per=per, cycles=80)
+    assert m.ctx[0].miss
+    assert len(edges) >= 2
+    assert (edges[1][0] - edges[0][0]) % int(per) == 0
+    assert edges[1][0] - edges[0][0] >= 2 * int(per)
 
 
 def test_miss_iff_empty_queue_while_running():
