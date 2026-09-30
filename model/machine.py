@@ -63,6 +63,7 @@ class Job:
     bits_done: int = 0
     result: int = 0
     msb_first: bool = True
+    half: int = 0  # 0=leading, 1=trailing when ecfg_clk_en
 
 
 @dataclass
@@ -106,6 +107,12 @@ class Context:
     miss_policy: MissPolicy = MissPolicy.FLAG
     default_byte: int = DEFAULT_BYTE
     ecfg_msb_first: bool = True
+    ecfg_clk_en: bool = False  # W8: two ticks/bit + drive CLK
+    ecfg_cpha: bool = False
+    ecfg_cpol: bool = False  # idle level of CLK when inactive
+    dout_lp: int = 0  # W10 engine pin map
+    din_lp: int = 1
+    clk_lp: int = 2
     timed_active: Optional[TimedOp] = None
     timed_pending: Optional[TimedOp] = None
     result: int = 0
@@ -184,6 +191,18 @@ class Machine:
             c.default_byte = int(cfg["default_byte"]) & 0xFF
         if "msb_first" in cfg:
             c.ecfg_msb_first = bool(cfg["msb_first"])
+        if "clk_en" in cfg:
+            c.ecfg_clk_en = bool(cfg["clk_en"])
+        if "cpha" in cfg:
+            c.ecfg_cpha = bool(cfg["cpha"])
+        if "cpol" in cfg:
+            c.ecfg_cpol = bool(cfg["cpol"])
+        if "dout_lp" in cfg:
+            c.dout_lp = int(cfg["dout_lp"]) & 3
+        if "din_lp" in cfg:
+            c.din_lp = int(cfg["din_lp"]) & 3
+        if "clk_lp" in cfg:
+            c.clk_lp = int(cfg["clk_lp"]) & 3
         if "pins" in cfg:
             for i, p in enumerate(cfg["pins"]):
                 c.pins[i] = LogicalPinCfg(
@@ -428,6 +447,42 @@ class Machine:
                     c.drive_val &= ~(1 << li)
                     c.drive_oe |= 1 << li
 
+    def _drive_lp(self, c: Context, lp: int, bit: int, oe: bool = True) -> None:
+        mode = c.pins[lp].mode
+        if mode == PinMode.OPENDRAIN:
+            if bit == 0 and oe:
+                c.drive_val &= ~(1 << lp)
+                c.drive_oe |= 1 << lp
+            else:
+                c.drive_oe &= ~(1 << lp)
+        elif mode == PinMode.INPUT:
+            return
+        else:
+            c.drive_val = (c.drive_val & ~(1 << lp)) | ((bit & 1) << lp)
+            if oe:
+                c.drive_oe |= 1 << lp
+            else:
+                c.drive_oe &= ~(1 << lp)
+
+    def _clk_active_level(self, c: Context) -> int:
+        return 0 if c.ecfg_cpol else 1
+
+    def _clk_idle_level(self, c: Context) -> int:
+        return 1 if c.ecfg_cpol else 0
+
+    def _sample_din(self, c: Context, job: Job) -> None:
+        lp = c.din_lp if job.mode != XferMode.IN else c.dout_lp
+        in_bit = self._logical_in(c, lp)
+        if job.msb_first:
+            job.result = ((job.result << 1) | in_bit) & 0xFFFF
+        else:
+            job.result = (job.result | (in_bit << job.bits_done)) & 0xFFFF
+
+    def _out_bit(self, job: Job) -> int:
+        remaining = job.n_bits - job.bits_done
+        shift = (remaining - 1) if job.msb_first else job.bits_done
+        return (job.data >> shift) & 1
+
     def _engine_bit(self, c: Context, job: Optional[Job]) -> None:
         assert job is not None
         if c.stretching:
@@ -435,30 +490,55 @@ class Machine:
             for li, p in enumerate(c.pins):
                 if p.mode == PinMode.OPENDRAIN:
                     c.drive_oe &= ~(1 << li)
-        remaining = job.n_bits - job.bits_done
-        shift = (remaining - 1) if job.msb_first else job.bits_done
-        out_bit = (job.data >> shift) & 1
-        if job.mode in (XferMode.OUT, XferMode.BOTH):
-            dout = 0
-            mode = c.pins[dout].mode
-            if mode == PinMode.OPENDRAIN:
-                if out_bit == 0:
-                    c.drive_val &= ~(1 << dout)
-                    c.drive_oe |= 1 << dout
+
+        if c.ecfg_clk_en:
+            # W8: two ticks per bit; CLK driven on c.clk_lp.
+            outb = self._out_bit(job)
+            if job.half == 0:
+                if c.ecfg_cpha:
+                    # CPHA=1: leading updates data + clock active
+                    if job.mode in (XferMode.OUT, XferMode.BOTH):
+                        self._drive_lp(c, c.dout_lp, outb)
+                    self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
                 else:
-                    c.drive_oe &= ~(1 << dout)
+                    # CPHA=0: data must be valid; leading samples + clock active
+                    if job.mode in (XferMode.OUT, XferMode.BOTH):
+                        self._drive_lp(c, c.dout_lp, outb)
+                    if job.mode in (XferMode.IN, XferMode.BOTH):
+                        self._sample_din(c, job)
+                    self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
+                job.half = 1
+                return
+            # trailing
+            if c.ecfg_cpha:
+                if job.mode in (XferMode.IN, XferMode.BOTH):
+                    self._sample_din(c, job)
+                self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
             else:
-                c.drive_val = (c.drive_val & ~(1 << dout)) | (out_bit << dout)
-                c.drive_oe |= 1 << dout
+                if job.mode in (XferMode.OUT, XferMode.BOTH):
+                    # prepare next bit's data on trailing (after sample)
+                    pass
+                self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
+                if job.mode in (XferMode.OUT, XferMode.BOTH) and job.bits_done + 1 < job.n_bits:
+                    # data for next bit changes on trailing edge
+                    job.bits_done += 1
+                    self._drive_lp(c, c.dout_lp, self._out_bit(job))
+                    job.bits_done -= 1
+            if job.mode == XferMode.BOTH and c.pins[c.dout_lp].mode == PinMode.OPENDRAIN:
+                if outb == 1 and self._logical_in(c, c.dout_lp) == 0:
+                    c.arb = True
+            job.half = 0
+            job.bits_done += 1
+            return
+
+        # Single-tick /bit (UART, SPI target on external SCLK, …)
+        out_bit = self._out_bit(job)
+        if job.mode in (XferMode.OUT, XferMode.BOTH):
+            self._drive_lp(c, c.dout_lp, out_bit)
         if job.mode in (XferMode.IN, XferMode.BOTH):
-            din_lp = 1 if job.mode == XferMode.BOTH else 0
-            in_bit = self._logical_in(c, din_lp)
-            if job.msb_first:
-                job.result = ((job.result << 1) | in_bit) & 0xFFFF
-            else:
-                job.result = (job.result | (in_bit << job.bits_done)) & 0xFFFF
-            if job.mode == XferMode.BOTH and c.pins[0].mode == PinMode.OPENDRAIN:
-                if out_bit == 1 and self._logical_in(c, 0) == 0:
+            self._sample_din(c, job)
+            if job.mode == XferMode.BOTH and c.pins[c.dout_lp].mode == PinMode.OPENDRAIN:
+                if out_bit == 1 and self._logical_in(c, c.dout_lp) == 0:
                     c.arb = True
         job.bits_done += 1
 
@@ -583,7 +663,10 @@ class Machine:
 
         if op == Op.XFER:
             data = c.regs[d["rs"]] if d["mode"] != XferMode.IN else 0
-            job = Job(d["mode"], d["n"], data, msb_first=c.ecfg_msb_first)
+            n = d["n"]
+            if d["mode"] in (XferMode.OUT, XferMode.BOTH) and n > 8:
+                raise ValueError("XFER out/both width must be 1..8")
+            job = Job(d["mode"], n, data, msb_first=c.ecfg_msb_first)
             if c.tick_source == TickSource.TIMER:
                 self._ensure_timer_for_timed(c)
             if not self._post_timed(c, TimedOp("xfer", job=job)):
@@ -719,7 +802,12 @@ class Machine:
         if spr == Spr.ERR:
             return int(c.miss) | (int(c.under) << 1) | (int(c.overrun) << 2) | (int(c.arb) << 3)
         if spr == Spr.ECFG:
-            return int(c.ecfg_msb_first)
+            return (
+                int(c.ecfg_msb_first)
+                | (int(c.ecfg_clk_en) << 1)
+                | (int(c.ecfg_cpha) << 2)
+                | (int(c.ecfg_cpol) << 3)
+            )
         if spr == Spr.PC:
             return c.pc
         if spr == Spr.ID:
@@ -749,6 +837,9 @@ class Machine:
             c.phase = (c.phase & ~0xFF00) | (val << 8)
         elif spr == Spr.ECFG:
             c.ecfg_msb_first = bool(val & 1)
+            c.ecfg_clk_en = bool(val & 2)
+            c.ecfg_cpha = bool(val & 4)
+            c.ecfg_cpol = bool(val & 8)
         elif spr == Spr.PC:
             c.pc = val & 0x3F
 

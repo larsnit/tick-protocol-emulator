@@ -174,7 +174,13 @@ def encode_alu(fn: int, rd: int, rs: int) -> int:
 
 
 def encode_xfer(rs: int, n: int, mode: int) -> int:
-    # n is 1..16 encoded as 0..15
+    # n is 1..16 encoded as 0..15. W9: out/both ≤8; in may be ≤16.
+    if mode in (XferMode.OUT, XferMode.BOTH) and n > 8:
+        raise ValueError("XFER out/both width must be 1..8 (W9)")
+    if mode == XferMode.IN and not (1 <= n <= 16):
+        raise ValueError("XFER in width must be 1..16")
+    if not 1 <= n <= 16:
+        raise ValueError("XFER n must be 1..16")
     return (Op.XFER << 12) | ((rs & 0x3) << 10) | (((n - 1) & 0xF) << 6) | ((mode & 0x3) << 4)
 
 

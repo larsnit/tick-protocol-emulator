@@ -310,6 +310,58 @@ def test_wait_timeout_event_first():
     assert not (c.evf & 0x10)
 
 
+def test_xfer_out_width_limit():
+    """W9: out/both capped at 8; in may be 9–16."""
+    import pytest
+    from model.opcodes import encode_xfer, XferMode
+
+    encode_xfer(0, 8, XferMode.OUT)
+    encode_xfer(0, 9, XferMode.IN)
+    with pytest.raises(ValueError):
+        encode_xfer(0, 9, XferMode.OUT)
+    with pytest.raises(ValueError):
+        encode_xfer(0, 9, XferMode.BOTH)
+
+
+def test_engine_clk_two_ticks_per_bit_cpha1():
+    """W8: with clk_en, each bit takes 2 ticks; CPHA=1 changes data on leading."""
+    src = """
+        LDI r0, 0x80
+        XFER r0, 2, out
+        hang: JMP AL, hang
+    """
+    m = Machine()
+    m.load(
+        assemble(src),
+        [
+            {
+                "per": 4.0,
+                "msb_first": True,
+                "clk_en": True,
+                "cpha": True,
+                "cpol": False,
+                "dout_lp": 0,
+                "clk_lp": 2,
+                "pins": [
+                    {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 0},
+                    {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+                    {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
+                ],
+            }
+        ],
+    )
+    trace_d, trace_c = [], []
+    for _ in range(40):
+        m.step()
+        trace_d.append(m.phys_drive[0] if m.phys_oe[0] else 0)
+        trace_c.append(m.phys_drive[2] if m.phys_oe[2] else 0)
+    # Clock should rise twice (2 bits × leading edges)
+    rises = [i for i in range(1, len(trace_c)) if trace_c[i - 1] == 0 and trace_c[i] == 1]
+    assert len(rises) >= 2, (rises, trace_c[:30])
+    # Spacing between leading edges ≈ 2*PER
+    assert rises[1] - rises[0] == 8, rises
+
+
 def test_mfs_rx_always_sets_c_from_bit8():
     """W4: MFS RX always does C := result[8], even when high bits are zero."""
     m = Machine()
