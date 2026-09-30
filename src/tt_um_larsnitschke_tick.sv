@@ -2,25 +2,24 @@
  * Copyright (c) 2026 Lars Nitschke
  * SPDX-License-Identifier: Apache-2.0
  *
- * Tiny Tapeout top: host load/control on ui_in, protocol pin on uio[0].
+ * Tiny Tapeout top: host load/control on ui_in, protocol pins on uio[7:0].
  *
- * ui_in[0]     : host_wr pulse (level-sensitive one-cycle via edge in TB)
- * ui_in[1]     : host_rd
- * ui_in[2]     : imem_we
- * ui_in[3]     : run
- * ui_in[7:4]   : host/imem low nibble mux select (see below)
- * uo_out[0]    : host_full
- * uo_out[1]    : host_empty
- * uo_out[2]    : dbg_waiting
- * uo_out[3]    : dbg_miss
- * uo_out[4]    : dbg_tick
- * uo_out[5]    : pin0 mirror
- * uio[0]       : protocol LP0 (TX)
+ * Pin plan (W12 short-term — see docs/pin-plan.md):
+ *   ui_in[0]     : host_wr
+ *   ui_in[1]     : host_rd
+ *   ui_in[2]     : imem_we
+ *   ui_in[3]     : run
+ *   ui_in[7:4]   : load mux select
+ *   uo_out[0]    : host_full
+ *   uo_out[1]    : host_empty
+ *   uo_out[2]    : dbg_waiting
+ *   uo_out[3]    : dbg_miss
+ *   uo_out[4]    : dbg_tick
+ *   uo_out[5]    : pin0 mirror
+ *   uio[7:0]     : all 8 reserved for protocol (LP0 on uio[0] today)
  *
- * Parallel load path (for cocotb / bring-up):
- *   Drive 16-bit imem word / 10-bit host word on uio[7:1]+spare via
- *   a shift register loaded from successive ui writes — see test helpers.
- *   Simpler: dedicated parallel bus through uio when run=0.
+ * Future host SPI target (deferred): SCLK/MOSI/CS_n/MISO on ui/uo;
+ * keep parallel load for bring-up.
  */
 
 `default_nettype none
@@ -119,7 +118,8 @@ module tt_um_larsnitschke_tick (
 
   assign uo_out = {1'b0, pin0_out, dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]};
   assign uio_out = {7'b0, pin0_out};
-  assign uio_oe  = {7'b0, pin0_oe};
+  // W12: force pads high-Z while !run (host owns uio for parallel load).
+  assign uio_oe  = run ? {7'b0, pin0_oe} : 8'h00;
 
   wire _unused = &{ena, dbg_pc, host_rdata[9:1], 1'b0};
 

@@ -60,6 +60,9 @@ module tick_core (
   reg [15:0] phase_left;
   reg [15:0] time_cnt;
   reg tick;
+  reg [19:0] per_fp;
+  reg [15:0] phase_cfg;
+  reg        msb_cfg;
 
   reg [1:0] a_kind, p_kind; // 0 empty 1 set 2 xfer 3 wait
   reg a_oe, p_oe;
@@ -125,8 +128,9 @@ module tick_core (
       waiting <= 1'b0; wait_mask <= 5'h0; wait_tc <= 2'b0;
       pull_block <= 1'b0; mfs_block <= 1'b0;
       timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0; time_cnt <= 16'h0; tick <= 1'b0;
+      per_fp <= cfg_per_fp; phase_cfg <= cfg_phase; msb_cfg <= cfg_msb_first;
       a_kind <= 2'd0; p_kind <= 2'd0; res_valid <= 1'b0; result <= 16'h0;
-      pin0_out <= 1'b1; pin0_oe <= 1'b1;
+      pin0_out <= 1'b1; pin0_oe <= 1'b0; // OE off until run
     end else begin
       tick <= 1'b0;
       if (imem_we) imem[imem_waddr] <= imem_wdata;
@@ -137,15 +141,18 @@ module tick_core (
       if (host_rd && !rx_empty) rx_r <= rx_r + 3'd1;
       host_rdata <= rxfifo[rx_r];
 
-      if (run) begin
+      if (!run) begin
+        // W12: pads high-Z while the host loads / is idle
+        pin0_oe <= 1'b0;
+      end else begin
         do_tick = 1'b0;
         if (timer_run) begin
           time_cnt <= time_cnt + 16'd1;
           if (phase_left != 16'h0) begin
             if (phase_left == 16'd1) do_tick = 1'b1;
             phase_left <= phase_left - 16'd1;
-          end else if (accum + 20'd16 >= cfg_per_fp) begin
-            accum <= accum + 20'd16 - cfg_per_fp;
+          end else if (accum + 20'd16 >= per_fp) begin
+            accum <= accum + 20'd16 - per_fp;
             do_tick = 1'b1;
           end else begin
             accum <= accum + 20'd16;
@@ -181,7 +188,7 @@ module tick_core (
           end
           waiting_n = 1'b0;
           if (wait_tc == 2'b01) begin
-            timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+            timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
           end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
             timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
           end
@@ -230,7 +237,7 @@ module tick_core (
             // Timed WAIT consumes this tick (EVF.TICK); apply tc.
             waiting_n = 1'b0;
             if (wait_tc == 2'b01) begin
-              timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+              timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
             end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
               timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
             end
@@ -268,7 +275,7 @@ module tick_core (
             if (wait_mask != 5'h0 && take && a_k != 2'd3 && p_k != 2'd3) begin
               waiting_n = 1'b0;
               if (wait_tc == 2'b01) begin
-                timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+                timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
               end else if (wait_tc == 2'b10 || wait_tc == 2'b11) begin
                 timer_run <= 1'b0; accum <= 20'h0; phase_left <= 16'h0;
               end
@@ -287,7 +294,7 @@ module tick_core (
         post_mode = 2'd0;
         post_nm1 = 4'd0;
         post_data = 8'h0;
-        post_msb = cfg_msb_first;
+        post_msb = msb_cfg;
 
         if (!waiting_n) begin
           case (op)
@@ -296,7 +303,7 @@ module tick_core (
                 if (slots_full_n) stalled = 1'b1;
                 else begin
                   if (!timer_run) begin
-                    timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+                    timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
                   end
                   do_post = 1'b1;
                   post_kind = 2'd1;
@@ -324,7 +331,7 @@ module tick_core (
                 if (slots_full_n) stalled = 1'b1;
                 else begin
                   // Ensure timer for timed WAIT (may restart after rearm/idle stop).
-                  timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+                  timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
                   do_post = 1'b1;
                   post_kind = 2'd3;
                   waiting_n = 1'b1;
@@ -380,14 +387,14 @@ module tick_core (
               if (slots_full_n) stalled = 1'b1;
               else begin
                 if (!timer_run) begin
-                  timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= cfg_phase;
+                  timer_run <= 1'b1; accum <= 20'h0; time_cnt <= 16'h0; phase_left <= phase_cfg;
                 end
                 do_post = 1'b1;
                 post_kind = 2'd2;
                 post_mode = instr[5:4];
                 post_nm1 = instr[9:6];
                 post_data = rf[instr[11:10]];
-                post_msb = cfg_msb_first;
+                post_msb = msb_cfg;
                 issued = 1'b1;
               end
             end
@@ -434,15 +441,19 @@ module tick_core (
                 end
               end else issued = 1'b1;
             end
-            // MTS subset: PER / PHASE / ECFG / ERR / PC (W12 short-term)
+            // MTS: PER / PHASE / ECFG / ERR / PC (W12)
             4'b1010: begin
               case (instr[9:6])
                 4'd5: begin // ERR clear-by-1
                   if (rf[instr[11:10]][0]) miss <= 1'b0;
                 end
-                4'd6: ; // PER_L — host cfg path preferred; stub for programs
-                4'd11: a_msb_n = rf[instr[11:10]][0]; // ECFG bit0 → will need store; use cfg
-                4'd12: next_pc = rf[instr[11:10]][5:0];
+                4'd6: per_fp[7:0] <= rf[instr[11:10]]; // PER_L
+                4'd7: per_fp[15:8] <= rf[instr[11:10]]; // PER_M
+                4'd8: per_fp[19:16] <= rf[instr[11:10]][3:0]; // PER_H
+                4'd9: phase_cfg[7:0] <= rf[instr[11:10]]; // PHASE_L
+                4'd10: phase_cfg[15:8] <= rf[instr[11:10]]; // PHASE_H
+                4'd11: msb_cfg <= rf[instr[11:10]][0]; // ECFG
+                4'd12: next_pc = rf[instr[11:10]][5:0]; // PC
                 default: ;
               endcase
               issued = 1'b1;
