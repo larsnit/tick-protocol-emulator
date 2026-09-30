@@ -82,17 +82,78 @@ def test_uart_tx_byte_0x55():
     assert bits[9] == 1, bits  # stop
 
 
+def _pin_trace(m: Machine, n: int) -> list[int]:
+    trace = []
+    for _ in range(n):
+        m.step()
+        cur = m.phys_drive[0] if m.phys_oe[0] else m.phys_ext[0]
+        trace.append(cur)
+    return trace
+
+
+def _falling_edges(trace: list[int]) -> list[int]:
+    return [i for i in range(1, len(trace)) if trace[i - 1] == 1 and trace[i] == 0]
+
+
+def _rising_edges(trace: list[int]) -> list[int]:
+    return [i for i in range(1, len(trace)) if trace[i - 1] == 0 and trace[i] == 1]
+
+
 def test_uart_tx_back_to_back():
+    """W1: two frames with exact PER spacing; ctx1 must not steal host bytes."""
+    per = 8
     img = assemble((ROOT / "programs" / "uart_tx.asm").read_text())
     m = Machine()
-    m.load(img, [_uart_tx_cfg(4.0)])
-    m.host_push(0x00)
-    m.host_push(0xFF, last=True)
-    # Just ensure it runs without miss during frames after host feed
-    for _ in range(500):
+    m.load(img, [_uart_tx_cfg(float(per))])
+    assert m.ctx[0].enabled and not m.ctx[1].enabled
+    m.host_push(0x11)
+    m.host_push(0x22, last=True)
+
+    miss_while_timer = False
+    trace = []
+    for _ in range(400):
         m.step()
-    # Should have consumed both bytes
+        cur = m.phys_drive[0] if m.phys_oe[0] else m.phys_ext[0]
+        trace.append(cur)
+        if m.ctx[0].timer_running and m.ctx[0].miss:
+            miss_while_timer = True
+
     assert len(m.host_to_core) == 0
+    assert m.ctx[1].regs[0] == 0  # ctx1 never pulled
+
+    # First falling edge after reset idle is start of frame 0
+    s0 = next(i for i in range(1, len(trace)) if trace[i - 1] == 1 and trace[i] == 0)
+    s1 = s0 + 10 * per  # start + 8 data + stop, then next start
+    assert s1 + 10 * per < len(trace)
+
+    def decode_frame(start: int) -> int:
+        bits = [trace[start + k * per + per // 2] for k in range(10)]
+        assert bits[0] == 0 and bits[9] == 1, (start, bits)
+        data = 0
+        for i, b in enumerate(bits[1:9]):
+            data |= b << i
+        return data
+
+    assert decode_frame(s0) == 0x11
+    assert decode_frame(s1) == 0x22
+    # Second start begins exactly one PER after first stop begins
+    stop0 = s0 + 9 * per
+    assert s1 == stop0 + per, (s0, stop0, s1)
+    # No MISS while the timer is still producing the frames
+    # (W3 may still set MISS after the final stop WAIT — allow only after last stop)
+    last_stop_end = s1 + 10 * per
+    early_miss = False
+    m2 = Machine()
+    m2.load(img, [_uart_tx_cfg(float(per))])
+    m2.host_push(0x11)
+    m2.host_push(0x22, last=True)
+    for cy in range(last_stop_end):
+        m2.step()
+        if m2.ctx[0].miss and cy < last_stop_end - 1:
+            early_miss = True
+            break
+    assert not early_miss
+    _ = miss_while_timer
 
 
 def test_spi_target_default_0xff():

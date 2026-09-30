@@ -81,6 +81,7 @@ class Context:
     pc: int = 0
     base: int = 0
     bound: int = IMEM_WORDS
+    enabled: bool = False  # host must configure a context before it issues
     z: bool = False
     c: bool = False
     evf: int = 0
@@ -157,6 +158,9 @@ class Machine:
 
     def configure(self, ci: int, cfg: dict) -> None:
         c = self.ctx[ci]
+        c.enabled = True
+        if "enabled" in cfg:
+            c.enabled = bool(cfg["enabled"])
         if "base" in cfg:
             c.base = cfg["base"]
         if "bound" in cfg:
@@ -756,19 +760,24 @@ class Machine:
             self._sync0[p] = levels[p]
 
         for c in self.ctx:
+            if not c.enabled:
+                continue
             self._check_traps(c)
 
         ticks = []
         for c in self.ctx:
             tick = False
-            if c.tick_source == TickSource.TIMER and c.timer_running:
-                tick = self._emit_tick(c)
-                c.time = (c.time + 1) & 0xFFFF
-            elif c.tick_source == TickSource.PIN_EDGE:
-                tick = self._emit_tick(c)
+            if c.enabled:
+                if c.tick_source == TickSource.TIMER and c.timer_running:
+                    tick = self._emit_tick(c)
+                    c.time = (c.time + 1) & 0xFFFF
+                elif c.tick_source == TickSource.PIN_EDGE:
+                    tick = self._emit_tick(c)
             ticks.append(tick)
 
         for ci, c in enumerate(self.ctx):
+            if not c.enabled:
+                continue
             had_timed = c.timed_active is not None
             if ticks[ci]:
                 self._on_tick(c)
@@ -779,7 +788,7 @@ class Machine:
             ci = self.sched
             self.sched = (self.sched + 1) % N_CONTEXTS
             c = self.ctx[ci]
-            if c.waiting:
+            if not c.enabled or c.waiting:
                 continue
             abs_pc = c.base + c.pc
             if abs_pc < IMEM_WORDS and decode(self.imem[abs_pc])["op"] in (
