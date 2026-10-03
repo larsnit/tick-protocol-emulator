@@ -276,3 +276,77 @@ def test_i2c_target_address_ack():
         m.step()
     ack = i2c_clock_byte_msb(m, 0x50, sample_ack=True)
     assert ack == 0, f"expected ACK, got NACK (pc={m.ctx[0].pc} miss={m.ctx[0].miss})"
+
+
+def _i2c_cfg():
+    return {
+        "tick_source": TickSource.PIN_EDGE,
+        "tick_pin": 1,
+        "tick_on_rise": True,
+        "msb_first": True,
+        "miss_policy": 3,
+        "pins": [
+            {"physical": 0, "mode": PinMode.OPENDRAIN, "idle": 1},
+            {"physical": 1, "mode": PinMode.OPENDRAIN, "idle": 1},
+        ],
+        "events": [
+            {"kind": EventKind.QUAL_FALL_WHILE_HIGH, "pin": 0, "qual_pin": 1},
+            {
+                "kind": EventKind.QUAL_RISE_WHILE_HIGH,
+                "pin": 0,
+                "qual_pin": 1,
+                "trap": True,
+                "vector": 0,
+            },
+        ],
+    }
+
+
+def test_i2c_rw_saved_before_address_mask():
+    """R/W bit must be copied out before AND 0xfe (assembly order)."""
+    src = (ROOT / "programs" / "i2c_target.asm").read_text().splitlines()
+    # Find MFS RX then require MOV r3,r0 before AND with 0xfe
+    body = "\n".join(ln.split(";")[0] for ln in src)
+    mfs = body.lower().index("mfs")
+    mov = body.lower().index("mov r3", mfs)
+    and_ = body.lower().index("and r0", mov)
+    assert mfs < mov < and_
+
+
+def test_i2c_target_read_path():
+    """Address+R → ACK → host byte out → master NACK → STOP → idle."""
+    from model.check_i2c import (
+        i2c_clock_byte_msb,
+        i2c_clock_in_byte_msb,
+        i2c_idle,
+        i2c_master_nack,
+        i2c_start,
+        i2c_stop,
+    )
+
+    img = assemble((ROOT / "programs" / "i2c_target.asm").read_text())
+    m = Machine()
+    m.load(img, [_i2c_cfg()])
+    m.host_push(0xC3, last=True)
+    i2c_idle(m, 8)
+    i2c_start(m)
+    for _ in range(8):
+        m.step()
+    ack = i2c_clock_byte_msb(m, 0x51, sample_ack=True)  # 0x28 << 1 | R
+    assert ack == 0, (m.ctx[0].pc, m.ctx[0].regs)
+    # Wait until read XFER is posted
+    for _ in range(40):
+        m.step()
+        ta = m.ctx[0].timed_active
+        if ta and ta.kind == "xfer" and ta.job and ta.job.mode == 0 and ta.job.n_bits == 8:
+            break
+    data = i2c_clock_in_byte_msb(m)
+    assert data == 0xC3, data
+    i2c_master_nack(m)
+    i2c_stop(m)
+    for _ in range(16):
+        m.step()
+    # STOP trap → vector 0 (idle WAIT); PC advances to 1 while waiting.
+    assert m.ctx[0].pc in (0, 1)
+    assert m.ctx[0].waiting or m.ctx[0].pc == 0
+    assert m.ctx[0].evf & 0x02  # EV1 = STOP

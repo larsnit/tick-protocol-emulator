@@ -1,0 +1,178 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+
+-- Executing script file `design_prep.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design.il
+
+2. Executing SCC pass (detecting logic loops).
+Found 0 SCCs in module tick_core.
+Found 0 SCCs in module tick_formal_top.
+Found 0 SCCs.
+
+3. Executing SIMPLEMAP pass (map simple cells to gate primitives).
+
+4. Executing MEMORY_NORDFF pass (extracting $dff cells from memories).
+
+5. Executing ASYNC2SYNC pass.
+Replacing tick_core.$procdff$7828 ($adff): ARST=\rst_n, D=$0\c[0:0], Q=\c
+Replacing tick_core.$procdff$7833 ($adff): ARST=\rst_n, D=$0\z[0:0], Q=\z
+Replacing tick_core.$procdff$7838 ($adff): ARST=\rst_n, D=$0$mem2reg_rd$\rxfifo$tick_core.sv:123$30_DATA[9:0]$76, Q=\host_rdata
+Replacing tick_core.$procdff$7843 ($adff): ARST=\rst_n, D=$0\pin0_out[0:0], Q=\pin0_out
+Replacing tick_core.$procdff$7848 ($adff): ARST=\rst_n, D=$0\pin0_oe[0:0], Q=\pin0_oe
+Replacing tick_core.$procdff$7858 ($adff): ARST=\rst_n, D=$0\tx_w[2:0], Q=\tx_w
+Replacing tick_core.$procdff$7863 ($adff): ARST=\rst_n, D=$0\tx_r[2:0], Q=\tx_r
+Replacing tick_core.$procdff$7868 ($adff): ARST=\rst_n, D=$0\rx_w[2:0], Q=\rx_w
+Replacing tick_core.$procdff$7873 ($adff): ARST=\rst_n, D=$0\rx_r[2:0], Q=\rx_r
+Replacing tick_core.$procdff$7878 ($adff): ARST=\rst_n, D=$0\pc[5:0], Q=\pc
+Replacing tick_core.$procdff$7893 ($adff): ARST=\rst_n, D=$0\miss[0:0], Q=\miss
+Replacing tick_core.$procdff$7898 ($adff): ARST=\rst_n, D=$0\waiting[0:0], Q=\waiting
+Replacing tick_core.$procdff$7903 ($adff): ARST=\rst_n, D=$0\wait_mask[4:0], Q=\wait_mask
+Replacing tick_core.$procdff$7908 ($adff): ARST=\rst_n, D=$0\wait_tc[1:0], Q=\wait_tc
+Replacing tick_core.$procdff$7913 ($adff): ARST=\rst_n, D=$0\pull_block[0:0], Q=\pull_block
+Replacing tick_core.$procdff$7925 ($adff): ARST=\rst_n, D=$0\mfs_block[0:0], Q=\mfs_block
+Replacing tick_core.$procdff$7937 ($adff): ARST=\rst_n, D=$0\timer_run[0:0], Q=\timer_run
+Replacing tick_core.$procdff$7942 ($adff): ARST=\rst_n, D=$0\accum[19:0], Q=\accum
+Replacing tick_core.$procdff$7947 ($adff): ARST=\rst_n, D=$0\phase_left[15:0], Q=\phase_left
+Replacing tick_core.$procdff$7957 ($adff): ARST=\rst_n, D=$0\tick[0:0], Q=\tick
+Replacing tick_core.$procdff$7962 ($adff): ARST=\rst_n, D=$0\a_kind[1:0], Q=\a_kind
+Replacing tick_core.$procdff$7967 ($adff): ARST=\rst_n, D=$0\p_kind[1:0], Q=\p_kind
+Replacing tick_core.$procdff$8084 ($adff): ARST=\rst_n, D=$0\res_valid[0:0], Q=\res_valid
+Replacing tick_core.$procdff$8089 ($adff): ARST=\rst_n, D=$0$lookahead\result$67[15:0]$128, Q=\result
+Replacing tick_core.$procdff$8188 ($adff): ARST=\rst_n, D=$0\imem[0][15:0], Q=\imem[0]
+Replacing tick_core.$procdff$8193 ($adff): ARST=\rst_n, D=$0\imem[1][15:0], Q=\imem[1]
+Replacing tick_core.$procdff$8198 ($adff): ARST=\rst_n, D=$0\imem[2][15:0], Q=\imem[2]
+Replacing tick_core.$procdff$8203 ($adff): ARST=\rst_n, D=$0\imem[3][15:0], Q=\imem[3]
+Replacing tick_core.$procdff$8208 ($adff): ARST=\rst_n, D=$0\imem[4][15:0], Q=\imem[4]
+Replacing tick_core.$procdff$8213 ($adff): ARST=\rst_n, D=$0\imem[5][15:0], Q=\imem[5]
+Replacing tick_core.$procdff$8218 ($adff): ARST=\rst_n, D=$0\imem[6][15:0], Q=\imem[6]
+Replacing tick_core.$procdff$8223 ($adff): ARST=\rst_n, D=$0\imem[7][15:0], Q=\imem[7]
+Replacing tick_core.$procdff$8228 ($adff): ARST=\rst_n, D=$0\imem[8][15:0], Q=\imem[8]
+Replacing tick_core.$procdff$8233 ($adff): ARST=\rst_n, D=$0\imem[9][15:0], Q=\imem[9]
+Replacing tick_core.$procdff$8238 ($adff): ARST=\rst_n, D=$0\imem[10][15:0], Q=\imem[10]
+Replacing tick_core.$procdff$8243 ($adff): ARST=\rst_n, D=$0\imem[11][15:0], Q=\imem[11]
+Replacing tick_core.$procdff$8248 ($adff): ARST=\rst_n, D=$0\imem[12][15:0], Q=\imem[12]
+Replacing tick_core.$procdff$8253 ($adff): ARST=\rst_n, D=$0\imem[13][15:0], Q=\imem[13]
+Replacing tick_core.$procdff$8258 ($adff): ARST=\rst_n, D=$0\imem[14][15:0], Q=\imem[14]
+Replacing tick_core.$procdff$8263 ($adff): ARST=\rst_n, D=$0\imem[15][15:0], Q=\imem[15]
+Replacing tick_core.$procdff$8268 ($adff): ARST=\rst_n, D=$0\imem[16][15:0], Q=\imem[16]
+Replacing tick_core.$procdff$8273 ($adff): ARST=\rst_n, D=$0\imem[17][15:0], Q=\imem[17]
+Replacing tick_core.$procdff$8278 ($adff): ARST=\rst_n, D=$0\imem[18][15:0], Q=\imem[18]
+Replacing tick_core.$procdff$8283 ($adff): ARST=\rst_n, D=$0\imem[19][15:0], Q=\imem[19]
+Replacing tick_core.$procdff$8288 ($adff): ARST=\rst_n, D=$0\imem[20][15:0], Q=\imem[20]
+Replacing tick_core.$procdff$8293 ($adff): ARST=\rst_n, D=$0\imem[21][15:0], Q=\imem[21]
+Replacing tick_core.$procdff$8298 ($adff): ARST=\rst_n, D=$0\imem[22][15:0], Q=\imem[22]
+Replacing tick_core.$procdff$8303 ($adff): ARST=\rst_n, D=$0\imem[23][15:0], Q=\imem[23]
+Replacing tick_core.$procdff$8308 ($adff): ARST=\rst_n, D=$0\imem[24][15:0], Q=\imem[24]
+Replacing tick_core.$procdff$8313 ($adff): ARST=\rst_n, D=$0\imem[25][15:0], Q=\imem[25]
+Replacing tick_core.$procdff$8318 ($adff): ARST=\rst_n, D=$0\imem[26][15:0], Q=\imem[26]
+Replacing tick_core.$procdff$8323 ($adff): ARST=\rst_n, D=$0\imem[27][15:0], Q=\imem[27]
+Replacing tick_core.$procdff$8328 ($adff): ARST=\rst_n, D=$0\imem[28][15:0], Q=\imem[28]
+Replacing tick_core.$procdff$8333 ($adff): ARST=\rst_n, D=$0\imem[29][15:0], Q=\imem[29]
+Replacing tick_core.$procdff$8338 ($adff): ARST=\rst_n, D=$0\imem[30][15:0], Q=\imem[30]
+Replacing tick_core.$procdff$8343 ($adff): ARST=\rst_n, D=$0\imem[31][15:0], Q=\imem[31]
+Replacing tick_core.$procdff$8348 ($adff): ARST=\rst_n, D=$0\imem[32][15:0], Q=\imem[32]
+Replacing tick_core.$procdff$8353 ($adff): ARST=\rst_n, D=$0\imem[33][15:0], Q=\imem[33]
+Replacing tick_core.$procdff$8358 ($adff): ARST=\rst_n, D=$0\imem[34][15:0], Q=\imem[34]
+Replacing tick_core.$procdff$8363 ($adff): ARST=\rst_n, D=$0\imem[35][15:0], Q=\imem[35]
+Replacing tick_core.$procdff$8368 ($adff): ARST=\rst_n, D=$0\imem[36][15:0], Q=\imem[36]
+Replacing tick_core.$procdff$8373 ($adff): ARST=\rst_n, D=$0\imem[37][15:0], Q=\imem[37]
+Replacing tick_core.$procdff$8378 ($adff): ARST=\rst_n, D=$0\imem[38][15:0], Q=\imem[38]
+Replacing tick_core.$procdff$8383 ($adff): ARST=\rst_n, D=$0\imem[39][15:0], Q=\imem[39]
+Replacing tick_core.$procdff$8388 ($adff): ARST=\rst_n, D=$0\imem[40][15:0], Q=\imem[40]
+Replacing tick_core.$procdff$8393 ($adff): ARST=\rst_n, D=$0\imem[41][15:0], Q=\imem[41]
+Replacing tick_core.$procdff$8398 ($adff): ARST=\rst_n, D=$0\imem[42][15:0], Q=\imem[42]
+Replacing tick_core.$procdff$8403 ($adff): ARST=\rst_n, D=$0\imem[43][15:0], Q=\imem[43]
+Replacing tick_core.$procdff$8408 ($adff): ARST=\rst_n, D=$0\imem[44][15:0], Q=\imem[44]
+Replacing tick_core.$procdff$8413 ($adff): ARST=\rst_n, D=$0\imem[45][15:0], Q=\imem[45]
+Replacing tick_core.$procdff$8418 ($adff): ARST=\rst_n, D=$0\imem[46][15:0], Q=\imem[46]
+Replacing tick_core.$procdff$8423 ($adff): ARST=\rst_n, D=$0\imem[47][15:0], Q=\imem[47]
+Replacing tick_core.$procdff$8428 ($adff): ARST=\rst_n, D=$0\imem[48][15:0], Q=\imem[48]
+Replacing tick_core.$procdff$8433 ($adff): ARST=\rst_n, D=$0\imem[49][15:0], Q=\imem[49]
+Replacing tick_core.$procdff$8438 ($adff): ARST=\rst_n, D=$0\imem[50][15:0], Q=\imem[50]
+Replacing tick_core.$procdff$8443 ($adff): ARST=\rst_n, D=$0\imem[51][15:0], Q=\imem[51]
+Replacing tick_core.$procdff$8448 ($adff): ARST=\rst_n, D=$0\imem[52][15:0], Q=\imem[52]
+Replacing tick_core.$procdff$8453 ($adff): ARST=\rst_n, D=$0\imem[53][15:0], Q=\imem[53]
+Replacing tick_core.$procdff$8458 ($adff): ARST=\rst_n, D=$0\imem[54][15:0], Q=\imem[54]
+Replacing tick_core.$procdff$8463 ($adff): ARST=\rst_n, D=$0\imem[55][15:0], Q=\imem[55]
+Replacing tick_core.$procdff$8468 ($adff): ARST=\rst_n, D=$0\imem[56][15:0], Q=\imem[56]
+Replacing tick_core.$procdff$8473 ($adff): ARST=\rst_n, D=$0\imem[57][15:0], Q=\imem[57]
+Replacing tick_core.$procdff$8478 ($adff): ARST=\rst_n, D=$0\imem[58][15:0], Q=\imem[58]
+Replacing tick_core.$procdff$8483 ($adff): ARST=\rst_n, D=$0\imem[59][15:0], Q=\imem[59]
+Replacing tick_core.$procdff$8488 ($adff): ARST=\rst_n, D=$0\imem[60][15:0], Q=\imem[60]
+Replacing tick_core.$procdff$8493 ($adff): ARST=\rst_n, D=$0\imem[61][15:0], Q=\imem[61]
+Replacing tick_core.$procdff$8498 ($adff): ARST=\rst_n, D=$0\imem[62][15:0], Q=\imem[62]
+Replacing tick_core.$procdff$8503 ($adff): ARST=\rst_n, D=$0\imem[63][15:0], Q=\imem[63]
+Replacing tick_core.$procdff$8508 ($adff): ARST=\rst_n, D=$0\rf[0][7:0], Q=\rf[0]
+Replacing tick_core.$procdff$8513 ($adff): ARST=\rst_n, D=$0\rf[1][7:0], Q=\rf[1]
+Replacing tick_core.$procdff$8518 ($adff): ARST=\rst_n, D=$0\rf[2][7:0], Q=\rf[2]
+Replacing tick_core.$procdff$8523 ($adff): ARST=\rst_n, D=$0\rf[3][7:0], Q=\rf[3]
+
+6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \tick_core..
+Finding unused cells or wires in module \tick_formal_top..
+Removed 14 unused cells and 14 unused wires.
+<suppressed ~15 debug messages>
+
+7. Executing FORMALFF pass.
+
+8. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \tick_core..
+Finding unused cells or wires in module \tick_formal_top..
+Removed 2 unused cells and 2 unused wires.
+<suppressed ~4 debug messages>
+
+9. Executing CHECK pass (checking for obvious problems).
+Checking module tick_core...
+Checking module tick_formal_top...
+Found and reported 0 problems.
+
+10. Executing SETUNDEF pass (replace undef values with defined constants).
+
+11. Executing OPT pass (performing simple optimizations).
+
+11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module tick_core.
+Optimizing module tick_formal_top.
+<suppressed ~1 debug messages>
+
+11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\tick_core'.
+Computing hashes of 1314 cells of `\tick_core'.
+Finding duplicate cells in `\tick_core'.
+Finding identical cells in module `\tick_formal_top'.
+Computing hashes of 29 cells of `\tick_formal_top'.
+Finding duplicate cells in `\tick_formal_top'.
+Computing hashes of 27 cells of `\tick_formal_top'.
+Finding duplicate cells in `\tick_formal_top'.
+<suppressed ~6 debug messages>
+Removed a total of 2 cells.
+
+11.3. Executing OPT_DFF pass (perform DFF optimizations).
+
+11.4. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \tick_core..
+Finding unused cells or wires in module \tick_formal_top..
+Removed 9 unused cells and 12 unused wires.
+<suppressed ~11 debug messages>
+
+11.5. Finished fast OPT passes.
+
+12. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \tick_core..
+Finding unused cells or wires in module \tick_formal_top..
+Removed 0 unused cells and 134 unused wires.
+<suppressed ~2 debug messages>
+
+13. Executing RTLIL backend.
+Output filename: ../model/design_prep.il
+
+End of script. Logfile hash: 4b7694c8ac, time: 0.06s, user: 0.05s, system: 0.00s, MEM: 33.12 MB peak
+Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+Time spent: 41% 4x opt_clean (0 sec), 13% 1x check (0 sec), ...

@@ -80,24 +80,52 @@ def _run_edges(src: str, per: float = 8.0, cycles: int = 200):
     return edges, m
 
 
+def _run_edge_sweep(src: str, per: float = 8.0, cycles: int = 120):
+    """RTL-aligned: edge cycle = step index; return (edges, first_miss_cycle)."""
+    m = Machine()
+    m.load(assemble(src), [_cfg_pushpull(float(per))])
+    assert m.ctx[0].enabled and not m.ctx[1].enabled
+    edges, prev, miss = [], None, None
+    for cy in range(cycles):
+        m.step()
+        cur = m.phys_drive[0] if m.phys_oe[0] else 1
+        if prev is not None and cur != prev:
+            edges.append((cy, cur))
+        prev = cur
+        if miss is None and m.ctx[0].miss:
+            miss = cy
+    return edges, miss
+
+
 def test_kth_timed_op_padding_sweep():
-    """W7: padding between posts must not reorder edges while posts stay ahead of ticks."""
+    """W7: padding must not reorder edges while posts stay ahead of the drain.
+
+    Single-context ISS matches RTL queue_order_sweep: clean 8-cycle grid for
+    k=0..14; first late-post / MISS break at k=15 (not k=7).
+    """
     per = 8.0
-    # With PER=8, keep k < 7 so the second post lands before the first tick.
     ref_deltas = None
-    for k in range(0, 7):
+    for k in range(0, 15):
         nops = "\n".join(["ALU MOV r0, r0"] * k)
         src = f"SET.T tx=0\n{nops}\nSET.T tx=1\nSET.T tx=0\nSET.T tx=1\nhang: JMP AL, hang\n"
-        edges, m = _run_edges(src, per=per)
+        edges, miss_cy = _run_edge_sweep(src, per=per)
         assert len(edges) == 4, (k, edges)
         assert [e[1] for e in edges] == [0, 1, 0, 1], (k, edges)
         assert all(b[0] - a[0] == int(per) for a, b in zip(edges, edges[1:])), (k, edges)
-        # Timer may MISS after the burst drains (W3); edges themselves must be clean.
+        assert miss_cy is None or miss_cy > edges[-1][0], (k, miss_cy, edges)
         deltas = [e[0] - edges[0][0] for e in edges]
         if ref_deltas is None:
             ref_deltas = deltas
         else:
             assert deltas == ref_deltas, (k, edges, ref_deltas)
+
+    # k=15 is the first late-post break (same k as RTL).
+    nops = "\n".join(["ALU MOV r0, r0"] * 15)
+    src = f"SET.T tx=0\n{nops}\nSET.T tx=1\nSET.T tx=0\nSET.T tx=1\nhang: JMP AL, hang\n"
+    edges15, miss15 = _run_edge_sweep(src, per=per)
+    assert miss15 is not None, edges15
+    assert edges15[0][0] + int(per) not in [e[0] for e in edges15[1:]], edges15
+    assert edges15[1][0] - edges15[0][0] == 2 * int(per), edges15
 
 
 def test_kth_timed_op_branching_paths():

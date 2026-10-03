@@ -34,12 +34,14 @@
 ## Formal note
 
 Earlier reset-only PASS was vacuous (`run=0`). The rebuilt wrapper drives free inputs
-and proves the queue invariant after the W2 post-tick fix.
+and proves the queue invariant after the W2 post-tick fix. Timing/`MISS` spacing
+claims are **ISS-tested**, not RTL-proven.
 
 ## Yosys cell count (generic techmap, not PDK)
 
-~6.4k cells for `tt_um_larsnitschke_tick` including FF instruction memory — under
-the ~25k 6x4 budget with headroom for a second context and line coding.
+**6466 cells** for `tt_um_larsnitschke_tick` including FF instruction memory
+(re-run 2026-09-30: `yosys` techmap+abc `stat` on current RTL) — under the
+~25k 6x4 budget with headroom for a second context and line coding.
 
 ## Still open before submission
 

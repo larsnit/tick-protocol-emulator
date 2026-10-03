@@ -1,0 +1,16 @@
+##   0:00:00  Solver: z3
+##   0:00:00  Trying induction in step 30..
+##   0:00:00  Trying induction in step 29..
+##   0:00:00  Trying induction in step 28..
+##   0:00:00  Trying induction in step 27..
+##   0:00:00  Trying induction in step 26..
+##   0:00:00  Trying induction in step 25..
+##   0:00:01  Trying induction in step 24..
+##   0:00:01  Trying induction in step 23..
+##   0:00:02  Trying induction in step 22..
+##   0:00:02  Trying induction in step 21..
+##   0:00:03  Trying induction in step 20..
+##   0:00:03  Trying induction in step 19..
+##   0:00:03  Trying induction in step 18..
+##   0:00:07  Trying induction in step 17..
+##   0:00:08  Trying induction in step 16..
