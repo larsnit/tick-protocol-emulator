@@ -1,7 +1,24 @@
 name: test
 on: [push, workflow_dispatch]
 jobs:
-  test:
+  model:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v6
+
+      - name: Setup python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Run ISS / model tests
+        run: pytest verification/model -q
+
+  rtl:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repo
@@ -13,7 +30,6 @@ jobs:
         shell: bash
         run: sudo apt-get update && sudo apt-get install -y iverilog
 
-      # Set Python up and install cocotb
       - name: Setup python
         uses: actions/setup-python@v6
         with:
@@ -21,11 +37,11 @@ jobs:
 
       - name: Install Python packages
         shell: bash
-        run: pip install -r test/requirements.txt
+        run: pip install -e . && pip install -r test/requirements.txt
 
-      - name: Run tests
+      - name: Run cocotb RTL tests
         run: |
-          cd test
+          cd verification/rtl
           make clean
           make
           # make will return success even if the test fails, so check for failure in the results.xml
@@ -34,7 +50,7 @@ jobs:
       - name: Test Summary
         uses: test-summary/action@v2.4
         with:
-          paths: "test/results.xml"
+          paths: "verification/rtl/results.xml"
         if: always()
 
       - name: upload waveform and test results
@@ -43,6 +59,6 @@ jobs:
         with:
           name: test-results
           path: |
-            test/tb.fst
-            test/results.xml
-            test/output/*
+            verification/rtl/tb.fst
+            verification/rtl/results.xml
+            verification/rtl/output/*

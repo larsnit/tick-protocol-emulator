@@ -1,8 +1,8 @@
 `default_nettype none
 
 // Tick protocol-emulator core — single context (time-multiplex of 2 deferred).
-// Encoding matches model/opcodes.py. Cycle order: timer → engine → waits → issue.
-// W2: queue posts are placed into the *post-tick* occupancy (ISS order).
+// Encoding matches sw/tick/isa.py. Cycle order: timer → engine → waits → issue.
+// Queue posts are placed into the *post-tick* occupancy (ISS order).
 
 module tick_core (
     input  wire        clk,
@@ -142,7 +142,7 @@ module tick_core (
       host_rdata <= rxfifo[rx_r];
 
       if (!run) begin
-        // W12: pads high-Z while the host loads / is idle
+        // Pads high-Z while the host loads / is idle
         pin0_oe <= 1'b0;
       end else begin
         do_tick = 1'b0;
@@ -441,7 +441,7 @@ module tick_core (
                 end
               end else issued = 1'b1;
             end
-            // MTS: PER / PHASE / ECFG / ERR / PC (W12)
+            // MTS: PER / PHASE / ECFG / ERR / PC
             4'b1010: begin
               case (instr[9:6])
                 4'd5: begin // ERR clear-by-1

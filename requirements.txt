@@ -1,2 +1,0 @@
-pytest>=8.0
-cocotb>=2.0

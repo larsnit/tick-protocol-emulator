@@ -1,0 +1,18 @@
+[tasks]
+prove
+
+[options]
+prove: mode prove
+prove: depth 30
+
+[engines]
+smtbmc z3
+
+[script]
+read -sv tick_core.sv
+read -sv tick_formal_top.sv
+prep -top tick_formal_top
+
+[files]
+../../src/tick_core.sv
+tick_formal_top.sv

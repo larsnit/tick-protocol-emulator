@@ -1,9 +1,0 @@
-# running in tick_prove/src/
-read -sv tick_core.sv
-read -sv tick_formal_top.sv
-prep -top tick_formal_top
-
-hierarchy -smtcheck
-rename -witness
-write_jny -no-connections ../model/design.json
-write_rtlil ../model/design.il

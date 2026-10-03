@@ -4,7 +4,7 @@
  *
  * Tiny Tapeout top: host load/control on ui_in, protocol pins on uio[7:0].
  *
- * Pin plan (W12 short-term — see docs/pin-plan.md):
+ * Pinout (parallel bring-up; host SPI shim deferred):
  *   ui_in[0]     : host_wr
  *   ui_in[1]     : host_rd
  *   ui_in[2]     : imem_we
@@ -118,7 +118,7 @@ module tt_um_larsnitschke_tick (
 
   assign uo_out = {1'b0, pin0_out, dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]};
   assign uio_out = {7'b0, pin0_out};
-  // W12: force pads high-Z while !run (host owns uio for parallel load).
+  // Force pads high-Z while !run (host owns uio for parallel load).
   assign uio_oe  = run ? {7'b0, pin0_oe} : 8'h00;
 
   wire _unused = &{ena, dbg_pc, host_rdata[9:1], 1'b0};

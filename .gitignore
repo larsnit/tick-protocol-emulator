@@ -7,16 +7,36 @@ runs
 tt_submission
 src/user_config.json
 src/config_merged.json
-test/sim_build
-test/__pycache__/
-test/results.xml
-test/gate_level_netlist.v
 .venv/
 __pycache__/
-model/__pycache__/
+**/__pycache__/
 .pytest_cache/
-synth/*.v
 *.pyc
+*.egg-info/
+
+# Simulation / cocotb
+verification/rtl/sim_build/
+verification/rtl/results.xml
+verification/rtl/gate_level_netlist.v
+verification/rtl/tb.fst
+verification/rtl/output/
+test/sim_build/
+test/results.xml
+test/gate_level_netlist.v
+test/__pycache__/
+
+# Formal build output (any depth)
+**/tick_prove/
+**/formal/**/tick/
 formal/tick_prove/
 formal/tick/
 formal/*.log
+verification/formal/**/tick_prove/
+verification/formal/tick/
+verification/formal/tick_prove/
+verification/formal/*.log
+*.sqlite
+
+# Synthesis artifacts
+synth/*.v
+synth/*.log
