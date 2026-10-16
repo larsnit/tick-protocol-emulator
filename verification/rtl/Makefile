@@ -7,7 +7,7 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 THIS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SRC_DIR = $(THIS_DIR)../../src
-PROJECT_SOURCES = tick_core.sv tt_um_larsnitschke_tick.sv
+PROJECT_SOURCES = host_fifo.sv tick_imem.sv tick_timer.sv tick_queue.sv tick_issue.sv tick_core.sv tt_um_larsnitschke_tick.sv
 
 ifneq ($(GATES),yes)
 
@@ -24,6 +24,7 @@ COMPILE_ARGS    += -DFUNCTIONAL
 COMPILE_ARGS    += -DSIM
 VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_io/verilog/sg13cmos5l_io.v
 VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog/sg13cmos5l_stdcell.v
+VERILOG_SOURCES += $(PDK_ROOT)/ihp-sg13cmos5l/libs.ref/sg13cmos5l_stdcell/verilog/sg13cmos5l_udp.v
 
 # this gets copied in by the GDS action workflow
 VERILOG_SOURCES += $(THIS_DIR)gate_level_netlist.v
@@ -38,7 +39,7 @@ VERILOG_SOURCES += $(THIS_DIR)tb.v
 TOPLEVEL = tb
 
 # List test modules to run, separated by commas and without the .py suffix:
-COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep
+COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz
 
 # Assembler / ISS live in sw/tick
 export PYTHONPATH := $(THIS_DIR)../../sw:$(PYTHONPATH)

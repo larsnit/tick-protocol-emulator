@@ -31,7 +31,10 @@ formal:
 
 synth:
 	@mkdir -p $(REPO)/synth
-	@yosys -p "read_verilog -sv $(REPO)/src/tick_core.sv $(REPO)/src/tt_um_larsnitschke_tick.sv; \
+	@yosys -p "read_verilog -sv \
+		$(REPO)/src/host_fifo.sv $(REPO)/src/tick_imem.sv $(REPO)/src/tick_timer.sv \
+		$(REPO)/src/tick_queue.sv $(REPO)/src/tick_issue.sv $(REPO)/src/tick_core.sv \
+		$(REPO)/src/tt_um_larsnitschke_tick.sv; \
 		hierarchy -top tt_um_larsnitschke_tick; proc; opt; \
 		synth -top tt_um_larsnitschke_tick; \
 		tee -o $(REPO)/synth/tick_yosys_stat.txt stat" \

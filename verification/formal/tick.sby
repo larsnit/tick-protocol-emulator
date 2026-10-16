@@ -9,10 +9,20 @@ prove: depth 30
 smtbmc z3
 
 [script]
+read -sv host_fifo.sv
+read -sv tick_imem.sv
+read -sv tick_timer.sv
+read -sv tick_queue.sv
+read -sv tick_issue.sv
 read -sv tick_core.sv
 read -sv tick_formal_top.sv
 prep -top tick_formal_top
 
 [files]
+../../src/host_fifo.sv
+../../src/tick_imem.sv
+../../src/tick_timer.sv
+../../src/tick_queue.sv
+../../src/tick_issue.sv
 ../../src/tick_core.sv
 tick_formal_top.sv

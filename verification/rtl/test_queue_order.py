@@ -32,12 +32,13 @@ async def run_prog(dut, src, cycles=120):
         if prev is not None and cur != prev:
             edges.append((cy, cur))
         prev = cur
+        # MISS sticky on uo_out[4] (top-level pin; works under GATES=yes)
         try:
-            m = int(dut.user_project.core.miss.value)
-            if miss is None and m:
-                miss = cy
-        except Exception:
-            pass
+            uo = int(dut.uo_out.value)
+        except ValueError:
+            uo = 0
+        if miss is None and ((uo >> 4) & 1):
+            miss = cy
     return edges, miss
 
 

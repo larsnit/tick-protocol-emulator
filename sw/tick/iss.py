@@ -14,6 +14,7 @@ from .isa import (
     N_CONTEXTS,
     N_EVENTS,
     N_LOGICAL_PINS,
+    READBACK_LATENCY,
     AluFn,
     JmpCond,
     MissPolicy,
@@ -26,6 +27,13 @@ from .isa import (
     XferMode,
     decode,
 )
+
+# 2 synchroniser flops on every input. Own-drive feedback into that path is
+# delayed by (READBACK_LATENCY - 2) so IN sees a same-context SET from cycle N
+# in cycle N+READBACK_LATENCY (docs/isa.md).
+_SYNC_DEPTH = 2
+_OWN_SAMPLE_DELAY = READBACK_LATENCY - _SYNC_DEPTH
+assert _OWN_SAMPLE_DELAY >= 0
 
 
 class EventKind(IntEnum):
@@ -44,6 +52,7 @@ class LogicalPinCfg:
     physical: int = 0
     mode: PinMode = PinMode.INPUT
     idle: int = 1
+    glitch_filter: bool = False
 
 
 @dataclass
@@ -53,6 +62,7 @@ class EventCfg:
     qual_pin: int = 1
     trap: bool = False
     vector: int = 0
+    latched: bool = False  # edge modes only; PULSE=False, LATCHED=True
 
 
 @dataclass
@@ -94,6 +104,8 @@ class Context:
     under: bool = False
     overrun: bool = False
     arb: bool = False
+    map_err: bool = False
+    cfg_err: bool = False
     per_fp: int = 16 << 4
     phase: int = 0
     time: int = 0
@@ -105,6 +117,7 @@ class Context:
     tick_pin: int = 2
     tick_on_rise: bool = True
     miss_policy: MissPolicy = MissPolicy.FLAG
+    miss_vector: int = 0
     default_byte: int = DEFAULT_BYTE
     ecfg_msb_first: bool = True
     ecfg_clk_en: bool = False  # engine clock: two ticks/bit + drive CLK
@@ -126,6 +139,7 @@ class Context:
         default_factory=lambda: [LogicalPinCfg(i) for i in range(N_LOGICAL_PINS)]
     )
     events: list[EventCfg] = field(default_factory=lambda: [EventCfg() for _ in range(N_EVENTS)])
+    ev_pending: int = 0  # latched-edge pending flags, bits 0..3 = EV0..EV3
     drive_val: int = 0
     drive_oe: int = 0
     stretching: bool = False
@@ -153,9 +167,21 @@ class Machine:
         self._sync0 = [1] * 8
         self._sync1 = [1] * 8
         self._sync_prev = [1] * 8
+        # End-of-previous-cycle pin sample feeding the synchroniser.
+        self._pin_sample = [1] * 8
+        # Delayed copy of own drives into the sample path (not the wire).
+        self._own_delay = [[1] * 8 for _ in range(max(1, _OWN_SAMPLE_DELAY))]
+        # Extra history for optional 3-sample majority after the 2-flop sync.
+        self._maj_hist = [[1, 1, 1] for _ in range(8)]
+        self._filt = [1] * 8
+        self._filt_prev = [1] * 8
         self.double_drive = False
         self.trace: list[dict] = []
         self.enable_trace = False
+        # Flat config image (docs/isa.md §2.1); ENABLE at 0x00.
+        self.cfg_mem = [0] * 0x50
+        self.cfg_addr = 0
+        self.cfg_rdata_latch = 0
 
     def load(self, image: list[int], configs: Optional[list[dict]] = None) -> None:
         self.imem = [0] * IMEM_WORDS
@@ -166,70 +192,143 @@ class Machine:
                 self.configure(i, cfg)
 
     def configure(self, ci: int, cfg: dict) -> None:
+        """Dict convenience: packs §2.1 bytes then applies them (enables context)."""
+        from .cfg import dict_to_bytes
+
+        # Load-time path: keep disabled until all context bytes are written.
+        self.ctx[ci].enabled = False
+        blobs = dict_to_bytes(ci, cfg, enable_mask=None)
+        for addr, val in sorted(blobs.items()):
+            if addr == 0x00:
+                continue
+            self.cfg_write(addr, val)
+        self.ctx[ci].pc = 0
+        mask = self.cfg_mem[0] & 3
+        if cfg.get("enabled", True):
+            mask |= 1 << ci
+        else:
+            mask &= ~(1 << ci)
+        self.cfg_write(0x00, mask)
+
+    def cfg_write(self, addr: int, val: int) -> None:
+        """Write one config byte (same rules as the RTL config port)."""
+        from . import cfg as C
+
+        addr &= 0xFF
+        val &= 0xFF
+        if addr == C.ADDR_ENABLE:
+            self.cfg_mem[addr] = val & 3
+            for i in range(N_CONTEXTS):
+                self.ctx[i].enabled = bool(val & (1 << i))
+            return
+        if addr < 0x10 or addr >= 0x50:
+            return
+        ci = 0 if addr < C.CTX1_BASE else 1
+        if self.ctx[ci].enabled:
+            self.ctx[ci].cfg_err = True
+            return
+        self.cfg_mem[addr] = val
+        self._apply_cfg_byte(ci, addr, val)
+
+    def cfg_read(self, addr: int) -> int:
+        addr &= 0xFF
+        if addr < len(self.cfg_mem):
+            return self.cfg_mem[addr] & 0xFF
+        return 0
+
+    def _apply_cfg_byte(self, ci: int, addr: int, val: int) -> None:
+        from . import cfg as C
+
         c = self.ctx[ci]
-        c.enabled = True
-        if "enabled" in cfg:
-            c.enabled = bool(cfg["enabled"])
-        if "base" in cfg:
-            c.base = cfg["base"]
-        if "bound" in cfg:
-            c.bound = cfg["bound"]
-        if "per" in cfg:
-            per = cfg["per"]
-            c.per_fp = int(round(per * 16)) if isinstance(per, float) else int(per)
-        if "phase" in cfg:
-            c.phase = int(cfg["phase"])
-        if "tick_source" in cfg:
-            c.tick_source = TickSource(cfg["tick_source"])
-        if "tick_pin" in cfg:
-            c.tick_pin = int(cfg["tick_pin"])
-        if "tick_on_rise" in cfg:
-            c.tick_on_rise = bool(cfg["tick_on_rise"])
-        if "miss_policy" in cfg:
-            c.miss_policy = MissPolicy(cfg["miss_policy"])
-        if "default_byte" in cfg:
-            c.default_byte = int(cfg["default_byte"]) & 0xFF
-        if "msb_first" in cfg:
-            c.ecfg_msb_first = bool(cfg["msb_first"])
-        if "clk_en" in cfg:
-            c.ecfg_clk_en = bool(cfg["clk_en"])
-        if "cpha" in cfg:
-            c.ecfg_cpha = bool(cfg["cpha"])
-        if "cpol" in cfg:
-            c.ecfg_cpol = bool(cfg["cpol"])
-        if "dout_lp" in cfg:
-            c.dout_lp = int(cfg["dout_lp"]) & 3
-        if "din_lp" in cfg:
-            c.din_lp = int(cfg["din_lp"]) & 3
-        if "clk_lp" in cfg:
-            c.clk_lp = int(cfg["clk_lp"]) & 3
-        if "pins" in cfg:
-            for i, p in enumerate(cfg["pins"]):
-                c.pins[i] = LogicalPinCfg(
-                    physical=p.get("physical", i),
-                    mode=PinMode(p.get("mode", PinMode.INPUT)),
-                    idle=p.get("idle", 1),
-                )
-                if c.pins[i].mode != PinMode.INPUT:
+        off = addr - C.ctx_base(ci)
+        if off == C.OFF_PINMAP_LO:
+            c.pins[0].physical = val & 7
+            c.pins[1].physical = (val >> 4) & 7
+        elif off == C.OFF_PINMAP_HI:
+            c.pins[2].physical = val & 7
+            c.pins[3].physical = (val >> 4) & 7
+        elif off == C.OFF_PINMODE:
+            for i in range(4):
+                c.pins[i].mode = PinMode((val >> (2 * i)) & 3)
+                c.drive_oe &= ~(1 << i)  # reset OE; mode INPUT until drive
+                if c.pins[i].mode == PinMode.PUSHPULL:
+                    c.drive_oe |= 1 << i
                     c.drive_val = (c.drive_val & ~(1 << i)) | ((c.pins[i].idle & 1) << i)
-                    if c.pins[i].mode == PinMode.PUSHPULL:
-                        c.drive_oe |= 1 << i
+                elif c.pins[i].mode == PinMode.OPENDRAIN:
+                    if c.pins[i].idle:
+                        c.drive_oe &= ~(1 << i)
                     else:
-                        if c.pins[i].idle:
-                            c.drive_oe &= ~(1 << i)
-                        else:
-                            c.drive_oe |= 1 << i
-                            c.drive_val &= ~(1 << i)
-        if "events" in cfg:
-            for i, e in enumerate(cfg["events"]):
-                c.events[i] = EventCfg(
-                    kind=EventKind(e["kind"]),
-                    pin=e.get("pin", 0),
-                    qual_pin=e.get("qual_pin", 1),
-                    trap=e.get("trap", False),
-                    vector=e.get("vector", 0),
-                )
-        c.pc = 0
+                        c.drive_oe |= 1 << i
+                        c.drive_val &= ~(1 << i)
+        elif off == C.OFF_PINIDLE:
+            # PINMODE is at a lower address so it often runs first while idle is
+            # still the dataclass default (1). Re-apply drive when idle arrives.
+            for i in range(4):
+                c.pins[i].idle = (val >> i) & 1
+                mode = c.pins[i].mode
+                if mode == PinMode.PUSHPULL:
+                    c.drive_oe |= 1 << i
+                    c.drive_val = (c.drive_val & ~(1 << i)) | ((c.pins[i].idle & 1) << i)
+                elif mode == PinMode.OPENDRAIN:
+                    if c.pins[i].idle:
+                        c.drive_oe &= ~(1 << i)
+                    else:
+                        c.drive_oe |= 1 << i
+                        c.drive_val &= ~(1 << i)
+        elif off == C.OFF_ENGINE:
+            c.dout_lp = val & 3
+            c.din_lp = (val >> 2) & 3
+            c.clk_lp = (val >> 4) & 3
+            c.ecfg_msb_first = bool(val & 0x40)
+            c.ecfg_clk_en = bool(val & 0x80)
+            self._sync_clk_tick_pin(c)
+        elif off == C.OFF_CLKCFG:
+            c.ecfg_cpol = bool(val & 1)
+            c.ecfg_cpha = bool(val & 2)
+        elif off == C.OFF_TICK:
+            c.tick_source = TickSource(val & 1)
+            c.tick_on_rise = bool(val & 2)
+            c.tick_pin = (val >> 2) & 3
+            self._sync_clk_tick_pin(c)
+        elif off == C.OFF_MISS:
+            c.miss_policy = MissPolicy(val & 3)
+            c.miss_vector = (val >> 2) & 0x3F
+        elif off == C.OFF_DEFAULT:
+            c.default_byte = val
+        elif off == C.OFF_PER_L:
+            c.per_fp = (c.per_fp & ~0xFF) | val
+        elif off == C.OFF_PER_M:
+            c.per_fp = (c.per_fp & ~(0xFF << 8)) | (val << 8)
+        elif off == C.OFF_PER_H:
+            c.per_fp = (c.per_fp & ~(0xF << 16)) | ((val & 0xF) << 16)
+        elif off == C.OFF_PHASE_L:
+            c.phase = (c.phase & ~0xFF) | val
+        elif off == C.OFF_PHASE_H:
+            c.phase = (c.phase & ~0xFF00) | (val << 8)
+        elif off == C.OFF_BASE:
+            c.base = val & 0x3F
+        elif off == C.OFF_BOUND:
+            b = val & 0x3F
+            c.bound = 64 if b == 0 else b
+        elif off == C.OFF_GLITCH:
+            for i in range(4):
+                c.pins[i].glitch_filter = bool(val & (1 << i))
+        elif C.OFF_EV0_CFG <= off <= C.OFF_EV0_TRAP + 6:
+            ei = (off - C.OFF_EV0_CFG) // 2
+            if (off - C.OFF_EV0_CFG) % 2 == 0:
+                c.events[ei].kind = EventKind(val & 0xF)
+                c.events[ei].pin = (val >> 4) & 3
+                c.events[ei].qual_pin = (val >> 6) & 3
+            else:
+                c.events[ei].trap = bool(val & 1)
+                c.events[ei].vector = (val >> 1) & 0x3F
+                c.events[ei].latched = bool(val & 0x80)
+
+    def _sync_clk_tick_pin(self, c: Context) -> None:
+        if c.ecfg_clk_en and c.tick_source == TickSource.PIN_EDGE:
+            if c.tick_pin != c.clk_lp:
+                c.cfg_err = True
+            c.tick_pin = c.clk_lp
 
     def host_push(self, data: int, last: bool = False, cmd: bool = False) -> None:
         if len(self.host_to_core) >= HOST_FIFO_DEPTH:
@@ -247,8 +346,11 @@ class Machine:
         return self.phys_ext[p] & 1
 
     def _apply_drives(self) -> None:
-        drives: list[list[tuple[int, int]]] = [[] for _ in range(8)]
+        # Per physical pin: collect (ci, li, bit) drives; lower LP wins within a
+        # context, higher context index wins across contexts (legacy).
+        drives: list[list[tuple[int, int, int]]] = [[] for _ in range(8)]
         for ci, c in enumerate(self.ctx):
+            seen_phys: dict[int, int] = {}
             for li in range(N_LOGICAL_PINS):
                 phys = c.pins[li].physical
                 if not (0 <= phys <= 7):
@@ -258,37 +360,70 @@ class Machine:
                 oe = (c.drive_oe >> li) & 1
                 if mode == PinMode.INPUT:
                     continue
+                driving = False
                 if mode == PinMode.OPENDRAIN:
                     if bit == 0 and oe:
-                        drives[phys].append((ci, 0))
+                        driving = True
+                        bit = 0
                 else:
                     if oe:
-                        drives[phys].append((ci, bit))
+                        driving = True
+                if not driving:
+                    continue
+                if phys in seen_phys:
+                    c.map_err = True
+                    # lower LP already recorded wins
+                    continue
+                seen_phys[phys] = li
+                drives[phys].append((ci, li, bit))
         self.double_drive = False
         for p in range(8):
             if len(drives[p]) > 1:
                 self.double_drive = True
-                _, val = max(drives[p], key=lambda x: x[0])
+                # Across contexts: highest context index wins
+                _, _, val = max(drives[p], key=lambda x: x[0])
                 self.phys_oe[p] = 1
                 self.phys_drive[p] = val
             elif len(drives[p]) == 1:
-                _, val = drives[p][0]
+                _, _, val = drives[p][0]
                 self.phys_oe[p] = 1
                 self.phys_drive[p] = val
             else:
                 self.phys_oe[p] = 0
 
+    def _pin_now(self, c: Context, li: int) -> int:
+        phys = c.pins[li].physical
+        if c.pins[li].glitch_filter:
+            return self._filt[phys]
+        return self._sync1[phys]
+
+    def _pin_prev(self, c: Context, li: int) -> int:
+        phys = c.pins[li].physical
+        if c.pins[li].glitch_filter:
+            return self._filt_prev[phys]
+        return self._sync_prev[phys]
+
     def _logical_in(self, c: Context, li: int) -> int:
-        return self._sync1[c.pins[li].physical]
+        return self._pin_now(c, li)
+
+    @staticmethod
+    def _is_edge_kind(kind: EventKind) -> bool:
+        return kind in (
+            EventKind.EDGE_RISE,
+            EventKind.EDGE_FALL,
+            EventKind.QUAL_FALL_WHILE_HIGH,
+            EventKind.QUAL_RISE_WHILE_HIGH,
+        )
 
     def _event_active(self, c: Context, ei: int) -> bool:
+        """Live pulse/level this cycle (traps and latch-update use this)."""
         e = c.events[ei]
         if e.kind == EventKind.HOST_DATA:
             return len(self.host_to_core) > 0
         if e.kind == EventKind.HOST_SPACE:
             return len(self.core_to_host) < HOST_FIFO_DEPTH
         pin = self._logical_in(c, e.pin)
-        prev = self._sync_prev[c.pins[e.pin].physical]
+        prev = self._pin_prev(c, e.pin)
         if e.kind == EventKind.LEVEL_LOW:
             return pin == 0
         if e.kind == EventKind.LEVEL_HIGH:
@@ -304,17 +439,36 @@ class Machine:
             return qual == 1 and prev == 0 and pin == 1
         return False
 
+    def _event_for_wait(self, c: Context, ei: int) -> bool:
+        """WAIT visibility: LATCHED edges use pending; else live pulse/level."""
+        e = c.events[ei]
+        if e.latched and self._is_edge_kind(e.kind):
+            return bool(c.ev_pending & (1 << ei))
+        return self._event_active(c, ei)
+
     def _event_mask_now(self, c: Context) -> int:
+        """WAIT event mask (pending for LATCHED edges)."""
         m = 0
         for ei in range(N_EVENTS):
-            if self._event_active(c, ei):
+            if self._event_for_wait(c, ei):
                 m |= 1 << ei
         return m
 
+    def _update_ev_pending(self, c: Context) -> None:
+        for ei, e in enumerate(c.events):
+            if e.latched and self._is_edge_kind(e.kind) and self._event_active(c, ei):
+                c.ev_pending |= 1 << ei
+
+    def _clear_ev_pending(self, c: Context, mask: int) -> None:
+        c.ev_pending &= ~(mask & 0xF)
+
     def _emit_tick(self, c: Context) -> bool:
         if c.tick_source == TickSource.PIN_EDGE:
-            pin = self._logical_in(c, c.tick_pin)
-            prev = self._sync_prev[c.pins[c.tick_pin].physical]
+            pin = self._pin_now(c, c.tick_pin)
+            prev = self._pin_prev(c, c.tick_pin)
+            if c.ecfg_clk_en:
+                # Both edges are ticks (engine clock, target mode).
+                return prev != pin
             if c.tick_on_rise:
                 return prev == 0 and pin == 1
             return prev == 1 and pin == 0
@@ -422,6 +576,7 @@ class Machine:
         else:
             c.timed_pending = None
         c.evf = fired
+        self._clear_ev_pending(c, fired)
         c.waiting = False
         self._apply_wait_tc(c, op.wait_tc)
         return True
@@ -430,7 +585,7 @@ class Machine:
         if c.miss_policy == MissPolicy.FLAG:
             return
         if c.miss_policy == MissPolicy.TRAP:
-            self._do_trap(c, c.events[0].vector)
+            self._do_trap(c, c.miss_vector)
         elif c.miss_policy == MissPolicy.SEND_DEFAULT:
             job = Job(XferMode.OUT, 8, c.default_byte, msb_first=c.ecfg_msb_first)
             self._post_timed(c, TimedOp("xfer", job=job))
@@ -492,33 +647,34 @@ class Machine:
                     c.drive_oe &= ~(1 << li)
 
         if c.ecfg_clk_en:
-            # Engine clock: two ticks per bit; CLK driven on c.clk_lp.
+            # Engine clock: two ticks per bit.
+            # Controller (timer ticks): drive CLK_LP. Target (pin-edge): do not.
+            drive_clk = c.tick_source == TickSource.TIMER
             outb = self._out_bit(job)
             if job.half == 0:
                 if c.ecfg_cpha:
                     # CPHA=1: leading updates data + clock active
                     if job.mode in (XferMode.OUT, XferMode.BOTH):
                         self._drive_lp(c, c.dout_lp, outb)
-                    self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
+                    if drive_clk:
+                        self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
                 else:
-                    # CPHA=0: data must be valid; leading samples + clock active
-                    if job.mode in (XferMode.OUT, XferMode.BOTH):
-                        self._drive_lp(c, c.dout_lp, outb)
+                    # CPHA=0: data already valid (first bit on post); sample + clock active
                     if job.mode in (XferMode.IN, XferMode.BOTH):
                         self._sample_din(c, job)
-                    self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
+                    if drive_clk:
+                        self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
                 job.half = 1
                 return
             # trailing
             if c.ecfg_cpha:
                 if job.mode in (XferMode.IN, XferMode.BOTH):
                     self._sample_din(c, job)
-                self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
+                if drive_clk:
+                    self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
             else:
-                if job.mode in (XferMode.OUT, XferMode.BOTH):
-                    # prepare next bit's data on trailing (after sample)
-                    pass
-                self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
+                if drive_clk:
+                    self._drive_lp(c, c.clk_lp, self._clk_idle_level(c))
                 if job.mode in (XferMode.OUT, XferMode.BOTH) and job.bits_done + 1 < job.n_bits:
                     # data for next bit changes on trailing edge
                     job.bits_done += 1
@@ -550,6 +706,7 @@ class Machine:
         c.stretching = False
         c.pull_block = None
         c.mfs_rx = None
+        c.ev_pending = 0
         self._stop_timer(c)
         for li, p in enumerate(c.pins):
             if p.mode == PinMode.INPUT:
@@ -671,6 +828,13 @@ class Machine:
                 self._ensure_timer_for_timed(c)
             if not self._post_timed(c, TimedOp("xfer", job=job)):
                 return
+            # CPHA=0 + engine clock: first DOUT bit when the job is posted.
+            if (
+                c.ecfg_clk_en
+                and not c.ecfg_cpha
+                and d["mode"] in (XferMode.OUT, XferMode.BOTH)
+            ):
+                self._drive_lp(c, c.dout_lp, self._out_bit(job))
             c.pc = next_pc
             return
 
@@ -800,7 +964,7 @@ class Machine:
         if spr == Spr.EVF:
             return c.evf & 0x1F
         if spr == Spr.ERR:
-            return int(c.miss) | (int(c.under) << 1) | (int(c.overrun) << 2) | (int(c.arb) << 3)
+            return int(c.miss) | (int(c.under) << 1) | (int(c.overrun) << 2) | (int(c.arb) << 3) | (int(c.map_err) << 4) | (int(c.cfg_err) << 5)
         if spr == Spr.ECFG:
             return (
                 int(c.ecfg_msb_first)
@@ -812,6 +976,8 @@ class Machine:
             return c.pc
         if spr == Spr.ID:
             return ID_VALUE
+        if spr == Spr.EVCLR:
+            return c.ev_pending & 0xF
         return 0
 
     def _write_spr(self, c: Context, spr: int, val: int) -> None:
@@ -825,6 +991,10 @@ class Machine:
                 c.overrun = False
             if val & 8:
                 c.arb = False
+            if val & 16:
+                c.map_err = False
+            if val & 32:
+                c.cfg_err = False
         elif spr == Spr.PER_L:
             c.per_fp = (c.per_fp & ~0xFF) | val
         elif spr == Spr.PER_M:
@@ -842,6 +1012,8 @@ class Machine:
             c.ecfg_cpol = bool(val & 8)
         elif spr == Spr.PC:
             c.pc = val & 0x3F
+        elif spr == Spr.EVCLR:
+            self._clear_ev_pending(c, val)
 
     def _service_waits(self, c: Context, tick: bool) -> None:
         if c.pull_block is not None and c.waiting:
@@ -885,6 +1057,7 @@ class Machine:
         if not fired:
             return
         c.evf = fired
+        self._clear_ev_pending(c, fired)
         c.waiting = False
         self._apply_wait_tc(c, c.wait_tc)
 
@@ -895,16 +1068,40 @@ class Machine:
                 c.evf = 1 << ei
                 return
 
+    def _sample_pins_for_sync(self) -> list[int]:
+        """Levels captured at end of cycle for the next cycle's synchroniser."""
+        levels = []
+        for p in range(8):
+            if self.phys_oe[p]:
+                # Own drive enters the sync path after _OWN_SAMPLE_DELAY cycles.
+                levels.append(self._own_delay[-1][p] & 1)
+            else:
+                levels.append(self.phys_ext[p] & 1)
+        return levels
+
+    def _shift_own_delay(self) -> None:
+        cur = [self.phys_drive[p] & 1 for p in range(8)]
+        if _OWN_SAMPLE_DELAY == 0:
+            self._own_delay = [cur]
+        else:
+            self._own_delay = [cur] + self._own_delay[:-1]
+
     def step(self) -> None:
-        levels = [self._phys_level(p) for p in range(8)]
+        # Synchronisers sample the previous cycle's end-of-cycle pin capture.
+        levels = list(self._pin_sample)
         self._sync_prev = list(self._sync1)
+        self._filt_prev = list(self._filt)
         for p in range(8):
             self._sync1[p] = self._sync0[p]
             self._sync0[p] = levels[p]
+            self._maj_hist[p] = [self._sync1[p]] + self._maj_hist[p][:2]
+            s = sum(self._maj_hist[p])
+            self._filt[p] = 1 if s >= 2 else 0
 
         for c in self.ctx:
             if not c.enabled:
                 continue
+            self._update_ev_pending(c)
             self._check_traps(c)
 
         ticks = []
@@ -946,6 +1143,10 @@ class Machine:
             break
 
         self._apply_drives()
+        # Wire updates immediately for external observers; sync path is delayed.
+        # Capture sync sample from the delayed own-drive *before* shifting the delay.
+        self._pin_sample = self._sample_pins_for_sync()
+        self._shift_own_delay()
         if self.enable_trace:
             self.trace.append({"cycle": self.cycle, "pc0": self.ctx[0].pc, "tick0": ticks[0]})
         self.cycle += 1

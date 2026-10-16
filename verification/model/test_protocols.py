@@ -9,8 +9,24 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 sys.path.insert(0, str(ROOT / "verification" / "model"))
 
+import pytest
+
 from tick import EventKind, Machine, PinMode, TickSource, assemble
 from check_uart import decode_uart_frame, falling_edges
+
+
+_XFAIL_SINGLE_EDGE = pytest.mark.xfail(
+    strict=True,
+    reason="single-edge engine drives SDA on SCL rise; fixed by engine clock (docs/isa.md §4)",
+)
+_SPI_XFAIL_SINGLE_EDGE = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "single-edge engine drives MISO on sample edge; fixed by engine clock "
+        "(docs/isa.md §4). Keep strict: a prior XPASS was from pin drive stuck "
+        "at idle-default 1 (PINIDLE after PINMODE), masking 0→1 on 0xFF MSB."
+    ),
+)
 
 
 def _uart_tx_cfg(per: float = 8.0):
@@ -158,6 +174,7 @@ def test_uart_tx_back_to_back():
     _ = miss_while_timer
 
 
+@_SPI_XFAIL_SINGLE_EDGE
 def test_spi_target_default_0xff():
     img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
     m = Machine()
@@ -194,13 +211,25 @@ def test_spi_target_default_0xff():
     for _ in range(10):
         m.step()
     # Clock 8 cycles — no host data → default path via PULL.NB
-    for bit in range(8):
+    # Mode 0: controller samples MISO on rising SCLK; with single-edge ticks the
+    # engine updates MISO on that same rising tick.
+    sample_edge_changes = 0
+    for _bit in range(8):
         m.phys_ext[2] = 0
-        m.step()
-        m.step()
+        for _ in range(4):
+            m.step()
         m.phys_ext[2] = 1
-        m.step()
-        m.step()
+        for _ in range(4):
+            before = m.phys_drive[0] if m.phys_oe[0] else 0
+            m.step()
+            after = m.phys_drive[0] if m.phys_oe[0] else 0
+            rise_tick = m._sync_prev[2] == 0 and m._sync1[2] == 1
+            if rise_tick and before != after:
+                sample_edge_changes += 1
+    assert sample_edge_changes == 0, (
+        f"MISO changed on {sample_edge_changes} rising sample ticks; "
+        "must be stable around the controller sample edge"
+    )
     # Program should be in loop; under flag set from PULL.NB
     assert m.ctx[0].under or m.ctx[0].pc >= 0
 
@@ -314,8 +343,16 @@ def test_i2c_rw_saved_before_address_mask():
     assert mfs < mov < and_
 
 
+@_XFAIL_SINGLE_EDGE
 def test_i2c_target_read_path():
-    """Address+R → ACK → host byte out → master NACK → STOP → idle."""
+    """Address+R → ACK → host byte out → master NACK → STOP → idle.
+
+    Known ISS bug with single-edge ticks: the bit engine updates open-drain SDA
+    on the SCL rising tick (while SCL is high). Releasing for a data '1' is
+    QUAL_RISE_WHILE_HIGH (STOP) and the trap cancels the XFER. Fixed by the
+    engine clock (both edges; drive on the opposite edge of sample) — see the
+    companion test_i2c_target_read_path_engine_clock.
+    """
     from check_i2c import (
         i2c_clock_byte_msb,
         i2c_clock_in_byte_msb,
@@ -327,7 +364,7 @@ def test_i2c_target_read_path():
 
     img = assemble((ROOT / "sw" / "programs" / "i2c_target.asm").read_text())
     m = Machine()
-    m.load(img, [_i2c_cfg()])
+    m.load(img, [_i2c_cfg()])  # STOP trap enabled for the whole transaction
     m.host_push(0xC3, last=True)
     i2c_idle(m, 8)
     i2c_start(m)
@@ -335,19 +372,246 @@ def test_i2c_target_read_path():
         m.step()
     ack = i2c_clock_byte_msb(m, 0x51, sample_ack=True)  # 0x28 << 1 | R
     assert ack == 0, (m.ctx[0].pc, m.ctx[0].regs)
-    # Wait until read XFER is posted
     for _ in range(40):
         m.step()
         ta = m.ctx[0].timed_active
         if ta and ta.kind == "xfer" and ta.job and ta.job.mode == 0 and ta.job.n_bits == 8:
             break
     data = i2c_clock_in_byte_msb(m)
-    assert data == 0xC3, data
+    assert data == 0xC3, (data, m.ctx[0].pc)
     i2c_master_nack(m)
     i2c_stop(m)
     for _ in range(16):
         m.step()
-    # STOP trap → vector 0 (idle WAIT); PC advances to 1 while waiting.
     assert m.ctx[0].pc in (0, 1)
     assert m.ctx[0].waiting or m.ctx[0].pc == 0
     assert m.ctx[0].evf & 0x02  # EV1 = STOP
+
+
+def _i2c_cfg_engine_clock():
+    """I2C target with engine clock: both SCL edges are ticks; CPOL=1, CPHA=1.
+
+    CPHA=1 drives DOUT on the leading (falling) edge so SDA changes while SCL
+    is low — required so STOP is not falsely detected mid-byte.
+    """
+    cfg = _i2c_cfg()
+    cfg.update(
+        {
+            "clk_en": True,
+            "cpol": True,   # SCL idle high
+            "cpha": True,   # drive on leading (fall), sample on trailing (rise)
+            "dout_lp": 0,
+            "din_lp": 0,
+            "clk_lp": 1,
+            "tick_pin": 1,
+        }
+    )
+    return cfg
+
+
+def _spi_cfg_engine_clock():
+    return {
+        "tick_source": TickSource.PIN_EDGE,
+        "tick_pin": 2,
+        "tick_on_rise": True,  # ignored when clk_en (both edges)
+        "msb_first": True,
+        "miss_policy": 2,
+        "default_byte": 0xFF,
+        "clk_en": True,
+        "cpol": False,  # SCLK idle low (mode 0)
+        "cpha": False,  # sample on leading (rise), drive next on trailing (fall)
+        "dout_lp": 0,
+        "din_lp": 1,
+        "clk_lp": 2,
+        "pins": [
+            {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 0},
+            {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            {"physical": 2, "mode": PinMode.INPUT, "idle": 1},
+            {"physical": 3, "mode": PinMode.INPUT, "idle": 1},
+        ],
+        "events": [
+            {"kind": EventKind.EDGE_FALL, "pin": 3},
+            {
+                "kind": EventKind.EDGE_RISE,
+                "pin": 3,
+                "trap": True,
+                "vector": 9,
+            },
+        ],
+    }
+
+
+def _sda_level(m: Machine) -> int:
+    if m.phys_oe[0] and not (m.phys_drive[0] & 1):
+        return 0
+    return 1
+
+
+def _miso_level(m: Machine) -> int:
+    return m.phys_drive[0] if m.phys_oe[0] else 0
+
+
+def test_i2c_target_read_path_engine_clock():
+    """Same as single-edge read path, but with clk_en (both SCL edges = ticks).
+
+    STOP trap stays enabled. SDA must only change on the falling (drive) edge,
+    half a bit-period away from the rising (sample) edge.
+    """
+    from check_i2c import (
+        _SCL_PHASE,
+        i2c_clock_byte_msb,
+        i2c_idle,
+        i2c_master_nack,
+        i2c_start,
+        i2c_stop,
+        _set_sda_scl,
+    )
+
+    img = assemble((ROOT / "sw" / "programs" / "i2c_target.asm").read_text())
+    m = Machine()
+    m.load(img, [_i2c_cfg_engine_clock()])
+    m.host_push(0xC3, last=True)
+    i2c_idle(m, 8)
+    i2c_start(m)
+    for _ in range(8):
+        m.step()
+    ack = i2c_clock_byte_msb(m, 0x51, sample_ack=True)
+    assert ack == 0, (m.ctx[0].pc, m.ctx[0].regs)
+    for _ in range(40):
+        m.step()
+        ta = m.ctx[0].timed_active
+        if ta and ta.kind == "xfer" and ta.job and ta.job.mode == 0 and ta.job.n_bits == 8:
+            break
+
+    value = 0
+    for _ in range(8):
+        # SCL low half: trailing→leading for CPOL=1 happens on fall; drive here.
+        _set_sda_scl(m, 1, 0)
+        sda_low_phase = None
+        for cy in range(_SCL_PHASE):
+            m.step()
+            if cy == _SCL_PHASE // 2:
+                sda_low_phase = _sda_level(m)
+        sda_before_rise = _sda_level(m)
+        _set_sda_scl(m, 1, 1)  # rising = sample edge for CPHA=1 (trailing)
+        for cy in range(_SCL_PHASE):
+            m.step()
+            # SDA must not change while SCL is high (would look like STOP).
+            assert _sda_level(m) == sda_before_rise, (
+                "SDA changed on/after SCL rise (sample edge)",
+                cy,
+                sda_before_rise,
+                _sda_level(m),
+            )
+        bit = sda_before_rise
+        value = (value << 1) | bit
+        assert sda_low_phase == bit or sda_low_phase is None
+        _set_sda_scl(m, 1, 0)
+        for _ in range(_SCL_PHASE):
+            m.step()
+
+    assert value == 0xC3, (value, m.ctx[0].pc)
+    i2c_master_nack(m)
+    i2c_stop(m)
+    for _ in range(16):
+        m.step()
+    assert m.ctx[0].pc in (0, 1)
+    assert m.ctx[0].waiting or m.ctx[0].pc == 0
+    assert m.ctx[0].evf & 0x02  # STOP trap stayed armed and fired
+
+
+def test_spi_target_engine_clock():
+    """SPI target with clk_en: MISO changes on falling edge, stable at rising sample."""
+    img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
+    m = Machine()
+    m.load(img, [_spi_cfg_engine_clock()])
+    m.phys_ext[3] = 0  # CS low
+    for _ in range(10):
+        m.step()
+
+    bits = []
+    for _ in range(8):
+        m.phys_ext[2] = 0  # falling = trailing for CPOL=0 → drive next / first setup
+        miso_at_fall = None
+        for cy in range(4):
+            m.step()
+            if cy == 2:
+                miso_at_fall = _miso_level(m)
+        miso_before_rise = _miso_level(m)
+        m.phys_ext[2] = 1  # rising = leading / sample
+        for cy in range(4):
+            m.step()
+            assert _miso_level(m) == miso_before_rise, (
+                "MISO changed on sample (rising) edge",
+                cy,
+                miso_before_rise,
+                _miso_level(m),
+            )
+        bits.append(miso_before_rise)
+        assert miso_at_fall == miso_before_rise or miso_at_fall is None
+
+    # Default byte 0xFF, MSB first
+    value = 0
+    for b in bits:
+        value = (value << 1) | b
+    assert value == 0xFF, bits
+    assert m.ctx[0].under or m.ctx[0].pc >= 0
+
+
+def _uart_rx_cfg(per: float = 8.0):
+    return {
+        "per": per,
+        "phase": int(per) // 2,
+        "tick_source": TickSource.TIMER,
+        "msb_first": False,
+        # XFER in samples DOUT_LP (same pin as UART TX uses for out).
+        "dout_lp": 0,
+        "din_lp": 0,
+        "pins": [
+            {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
+        ],
+        "events": [
+            {"kind": EventKind.EDGE_FALL, "pin": 0, "latched": True},
+            {"kind": EventKind.LEVEL_HIGH, "pin": 0},
+        ],
+    }
+
+
+def _drive_uart_byte(m: Machine, byte: int, per: int, pin: int = 0) -> None:
+    """Drive one 8N1 frame on phys_ext[pin], one level per cycle (LSB first)."""
+    bits = [0]  # start
+    for i in range(8):
+        bits.append((byte >> i) & 1)
+    bits.append(1)  # stop
+    for b in bits:
+        m.phys_ext[pin] = b
+        for _ in range(per):
+            m.step()
+
+
+def test_uart_rx_back_to_back_per8():
+    """LATCHED RX-fall + EVCLR after XFER: every byte received at PER=8."""
+    per = 8
+    img = assemble((ROOT / "sw" / "programs" / "uart_rx.asm").read_text())
+    m = Machine()
+    m.load(img, [_uart_rx_cfg(float(per))])
+    m.phys_ext[0] = 1
+    for _ in range(8):
+        m.step()
+
+    payload = [0x55, 0x00, 0xFF, 0xA5]
+    for b in payload:
+        _drive_uart_byte(m, b, per)
+
+    # Idle high while the last frame drains through MFS/PUSH.
+    m.phys_ext[0] = 1
+    for _ in range(per * 4):
+        m.step()
+
+    got = []
+    while True:
+        w = m.host_pop()
+        if w is None:
+            break
+        got.append(w.data)
+    assert got == payload, got

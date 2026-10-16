@@ -25,18 +25,15 @@ test/results.xml
 test/gate_level_netlist.v
 test/__pycache__/
 
-# Formal build output (any depth)
+# Formal SymbiYosys workdirs
 **/tick_prove/
-**/formal/**/tick/
-formal/tick_prove/
-formal/tick/
-formal/*.log
-verification/formal/**/tick_prove/
 verification/formal/tick/
 verification/formal/tick_prove/
 verification/formal/*.log
 *.sqlite
 
-# Synthesis artifacts
-synth/*.v
-synth/*.log
+# Local git worktrees (do not commit)
+.worktrees/
+
+# Yosys / local synth build output (Makefile recreates synth/)
+synth/

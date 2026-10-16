@@ -21,7 +21,7 @@ executable reference.
 | Timed-queue ordering | A new timed op goes into the queue **after** the current cycle's tick has been applied (post-tick state). ISS and RTL must do exactly the same |
 | Tick-consuming WAIT | A `WAIT` with TICK in its mask is a real queue entry that consumes a tick. Three new rules: same-cycle event and tick; starting a stopped timer; illegal combinations |
 | MFS RX carry | `MFS rd, RX` always sets `C := result[8]` |
-| Engine clock | *Proposal, awaiting approval:* clocked protocols use two ticks per bit in both roles; the engine can drive a clock pin |
+| Engine clock | **Approved (§4):** two ticks per bit in both roles; CLK_EN/CLK_LP/CPOL/CPHA in the configuration register map; Stage 2d (pin-edge ticks) merges into the engine-clock RTL step |
 | XFER width | `XFER` out/both: 1–8 bits; in: 1–16 bits |
 | Engine pin selection | Engine pins (DOUT, DIN, CLK) are chosen per context, not hard-wired to LP0/LP1 |
 | — | Read-back latency fixed at **3 cycles** |
@@ -48,8 +48,13 @@ executable reference.
    - If both slots are full, the next post stalls the program, not the wire.
 3. **A timed action happens on its tick cycle**, plus a fixed output delay L,
    whatever instructions ran in between. **This is the headline property.**
-   A context sees its own pin change on its inputs 3 cycles after driving it
-   (architectural read-back latency).
+   **Read-back latency** (constant `READBACK_LATENCY` in `sw/tick/isa.py`, value 3):
+   - Every input passes through **2 synchroniser flip-flops**. An external pin
+     change during cycle *M* is first visible to logic (IN, IN.T, XFER samples,
+     events, pin-edge ticks) in cycle *M+2*.
+   - A context's own output, changed by an instruction in cycle *N*, is first
+     visible to an IN in cycle *N+3* (one cycle of own-drive feedback delay into
+     the same 2-flop synchroniser path).
 4. **A stopped timer restarts in one of two ways:**
    - at an event: `WAIT ev, rearm` sets tick 0 to event time + `PHASE`. The
      hardware does this at the event cycle, not when the instruction resumes;
@@ -103,7 +108,8 @@ executable reference.
 - **Timed queue:** active + pending slot. Entry kinds: SET, IN, XFER, WAIT.
 - **Bit engine:** 16-bit shift register; a result latch with an overrun flag.
   Pin roles DOUT, DIN and (§4) CLK are logical-pin selections in the static setup.
-- **Error flags (sticky):** MISS, UNDER, OVERRUN, ARB.
+- **Error flags (sticky):** MISS, UNDER, OVERRUN, ARB, MAP (dual logical→physical),
+  CFG (config write while enabled / clock-pin mismatch).
 - **Four logical pins (LP0–LP3).** Each maps to any physical pin and has:
   - a mode: input, push-pull or open-drain;
   - an idle value, driven after a trap.
@@ -113,6 +119,16 @@ executable reference.
   - host data available, or host space available.
 
   Any event can be marked as a trap with its own vector address.
+
+  **Edge delivery (config bit PULSE / LATCHED on each selector):**
+  - **PULSE (default):** an edge is visible for one cycle only. If no `WAIT` is
+    checking that cycle, the edge is lost.
+  - **LATCHED:** the edge sets a per-event *pending* flag. Pending is cleared
+    when (1) a `WAIT` ends and reports that event in `EVF`, (2) the program
+    writes 1 to that bit in `EVCLR` (SPR 14), or (3) a trap is taken.
+  - Level events and host-data / host-space are never latched (they are levels).
+  - Traps still fire from the live edge on the cycle it occurs; they do not wait
+    on pending, and taking a trap clears all pending flags.
 
 ### Shared
 - 64 × 16-bit instruction memory, split between the contexts by base/bound
@@ -126,14 +142,103 @@ executable reference.
 
 ### Static setup vs runtime state
 Static setup (pin map, engine pins, event selectors, tick source, error policies,
-enable mask) is written by the host at load time. Only values that change while
-a program runs go through instructions.
+enable mask, engine-clock fields) is written by the host at load time through the
+**configuration register map** (§2.1). Only values that change while a program
+runs go through instructions (PER/PHASE/ECFG via MTS, etc.).
 
 ### Host link (decided)
 SPI target on 4 dedicated pins (SCLK, MOSI, CS_n on `ui`; MISO on `uo`). All
 8 `uio` pins are left for protocols. The link must move host words in both
 directions **while contexts run**. At ~clk/12 it is enough to load programs and
 stream UART and SPI-target demos, but not 10BASE-T.
+
+### Parallel load command nibbles (`ui[7:4]`, while `RUN=0`)
+
+| Nibble | Name | `uio[7:0]` / effect |
+|---|---|---|
+| `0xA` | IMEM_ADDR | Instruction address |
+| `0xB` | IMEM_LO | Instruction low byte |
+| `0xC` | IMEM_HI | Instruction high byte |
+| `0xD` | HOST_LO | Host TX word low (data) |
+| `0xE` | HOST_HI | Host TX word `{6'b0, CMD, LAST}` |
+| `0x9` | CFG_ADDR | Set config register address |
+| `0xF` | CFG_WR | Write `uio` to `cfg[CFG_ADDR]`, then `CFG_ADDR++` |
+| `0x8` | CFG_RD | Read `cfg[CFG_ADDR]` into the config readback latch (no auto-inc); while `RUN=0`, `uo_out[7:0]` mirrors that latch so the host can sample the byte |
+
+The SPI host link will drive the same config read/write port later.
+
+### 2.1 Configuration registers
+
+Byte address space with a **read port and a write port**:
+`(cfg_we, cfg_re, cfg_addr[7:0], cfg_wdata[7:0], cfg_rdata[7:0])`.
+
+**Flat addressing (no CTX_SEL):** shared registers below `0x10`; context 0 at
+`0x10`–`0x2F`; context 1 at `0x30`–`0x4F`. Offset within a context block is
+`addr & 0x1F` (same layout for both).
+
+**Reset:** every context **disabled**; every logical pin **input** (OE off).
+`PER`/`PHASE` reset to implementation defaults (e.g. PER=8.0); other fields 0.
+
+**Writes to an enabled context are ignored** and set sticky `ERR.CFG` (bit 5).
+Disable the context (or leave it disabled at load time) before writing its
+block. Shared registers (`0x00`–`0x0F`) are always writable.
+
+**`PER` / `PHASE`:** the config-map bytes and `MTS PER_*` / `MTS PHASE_*` are
+the **same registers**. The host loads the initial value; the program may
+overwrite them at run time.
+
+**Target clock pin:** with `CLK_EN=1` and tick source = pin-edge, the tick pin
+**is** `CLK_LP` (one source of truth). The `TICK.tick_pin` field is ignored in
+that mode; if software writes a differing `tick_pin`, `ERR.CFG` is set and
+`CLK_LP` wins.
+
+#### Shared (`0x00`–`0x0F`)
+
+| Addr | Name | Bits | Reset | Meaning |
+|---|---|---|---|---|
+| `0x00` | ENABLE | `[1:0]` | 0 | Bit *i* enables context *i* |
+| `0x01`–`0x0F` | — | — | 0 | Reserved |
+
+#### Context block (ctx0 = `0x10`+off, ctx1 = `0x30`+off)
+
+| Off | Name | Bits | Meaning |
+|---|---|---|---|
+| `0x00` | PINMAP_LO | `[2:0]` LP0 phys, `[6:4]` LP1 phys | Physical pin 0–7 |
+| `0x01` | PINMAP_HI | `[2:0]` LP2, `[6:4]` LP3 | |
+| `0x02` | PINMODE | per LP `[1:0]`: `00` in, `01` push-pull, `10` open-drain | |
+| `0x03` | PINIDLE | `[3:0]` | Idle level after trap |
+| `0x04` | ENGINE | `[1:0]` DOUT_LP, `[3:2]` DIN_LP, `[5:4]` CLK_LP, `[6]` MSB_FIRST, `[7]` CLK_EN | |
+| `0x05` | CLKCFG | `[0]` CPOL, `[1]` CPHA | Ignored if `CLK_EN=0` |
+| `0x06` | TICK | `[0]` source (`0` timer, `1` pin), `[1]` rise (ignored if `CLK_EN`), `[3:2]` tick_pin LP | See target-clock rule above |
+| `0x07` | MISS | `[1:0]` policy, `[7:2]` trap vector | Policy: `0` flag, `1` trap (uses **this** vector, not EV0), `2` send-default, `3` stretch |
+| `0x08` | DEFAULT | `[7:0]` | Default byte for send-default / `PULL.NB` |
+| `0x09` | PER_L | `[7:0]` | Same register as `MTS PER_L` |
+| `0x0A` | PER_M | `[7:0]` | Same as `MTS PER_M` |
+| `0x0B` | PER_H | `[3:0]` | Same as `MTS PER_H` |
+| `0x0C` | PHASE_L | `[7:0]` | Same as `MTS PHASE_L` |
+| `0x0D` | PHASE_H | `[7:0]` | Same as `MTS PHASE_H` |
+| `0x0E` | BASE | `[5:0]` | Instruction base |
+| `0x0F` | BOUND | `[5:0]` | Program length in words; **0 means 64** (full IMEM) |
+| `0x10` | EV0_CFG | `[3:0]` kind, `[5:4]` pin, `[7:6]` qual | |
+| `0x11` | EV0_TRAP | `[0]` trap en, `[6:1]` vector, `[7]` **LATCHED** (0=PULSE) | Edge modes only; ignored for level/host |
+| `0x12`–`0x17` | EV1–EV3 | same as EV0 | |
+| `0x18` | GLITCH | `[3:0]` | Per-LP enable for 3-sample majority filter (after the 2-flop sync) |
+| `0x19`–`0x1F` | — | — | Reserved |
+
+**Event kind codes:** `0` level-low, `1` level-high, `2` edge-rise, `3` edge-fall,
+`4` qual-fall-while-high, `5` qual-rise-while-high, `6` host-data, `7` host-space.
+
+#### Dual-map and sticky errors
+
+Two logical pins → one physical: **lower LP index wins**; sticky `ERR.MAP`
+(bit 4). Config violations (write while enabled, CLK_LP/tick_pin mismatch with
+`CLK_EN`): sticky `ERR.CFG` (bit 5). Bits: `MISS=0`, `UNDER=1`, `OVERRUN=2`,
+`ARB=3`, `MAP=4`, `CFG=5`. Write-1-to-clear via `MTS ERR`.
+
+#### ISS / RTL helper
+
+`tick.cfg` packs/unpacks this map; `Machine.apply_cfg_bytes` / `configure()`
+(dict convenience) keep ISS and RTL on identical bytes.
 
 ---
 
@@ -189,13 +294,14 @@ stream UART and SPI-target demos, but not 10BASE-T.
 | 2 | TIME_L | R | Cycles since last re-arm, low byte (reading latches TIME_H) |
 | 3 | TIME_H | R | High byte of the latched value |
 | 4 | EVF | R | Events recorded by the last WAIT |
-| 5 | ERR | R/W | Sticky errors (MISS, UNDER, OVERRUN, ARB); write 1 to clear |
+| 5 | ERR | R/W | Sticky errors (MISS, UNDER, OVERRUN, ARB, MAP, CFG); write 1 to clear |
 | 6–8 | PER_L/M/H | W | Tick period, 20.4 fixed point |
 | 9–10 | PHASE_L/H | W | Offset of tick 0 after a re-arm |
-| 11 | ECFG | R/W | Engine config: bit order, line code; §4 clock fields (proposal) |
+| 11 | ECFG | R/W | Engine config: bit order, line code (clock fields live in the configuration register map, not here) |
 | 12 | PC | R/W | Write = computed jump (host command dispatch) |
 | 13 | ID | R | Version, instruction-memory size, context count |
-| 14–15 | — | — | Reserved |
+| 14 | EVCLR | R/W | R: latched-edge pending flags `[3:0]` = EV0–EV3. W: write 1 to clear pending bits |
+| 15 | — | — | Reserved |
 
 ### 3.3 Encoding
 
@@ -239,14 +345,14 @@ MTS   1010 ss rrrr ------
 
 ---
 
-## 4. Engine clock generation — *proposal, awaiting approval*
+## 4. Engine clock generation — **approved**
 
 **Why:** a controller has to *produce* the clock, and v0.1 had no way to do it.
 The engine drove only one data pin, so the SPI and I2C controller programs never
 toggled a clock.
 
-**Proposed static/ECFG fields:** `CLK_EN`, `CLK_LP` (logical pin), `CPOL`, `CPHA`,
-plus the engine pins `DOUT_LP`, `DIN_LP`.
+**Configuration fields** (configuration register map, **not** ECFG): `CLK_EN`,
+`CLK_LP` (logical pin), `CPOL`, `CPHA`, plus engine pins `DOUT_LP`, `DIN_LP`.
 
 **Behaviour:** with `CLK_EN` set, **each XFER bit takes two ticks**, a leading
 and a trailing one. `PER` is therefore half a bit period (bit rate = f_clk / (2 · PER)).
@@ -256,21 +362,18 @@ and a trailing one. `PER` is therefore half a bit period (bit rate = f_clk / (2 
 | CPHA = 0 | Clock to active level; **sample** DIN | Clock to idle; **drive** the next DOUT bit |
 | CPHA = 1 | Clock to active level; **drive** DOUT | Clock to idle; **sample** DIN |
 
-- With CPHA = 0 the first bit is driven when the job starts, at least half a
-  period before the first leading tick.
-- **Controller:** the tick source is the timer, and the engine drives `CLK_LP`.
-- **Target:** the tick source is the clock pin; both of its edges are ticks, and
-  the engine doesn't drive the clock. So the engine does the same thing in both
-  roles.
-- **I2C controller** (open-drain clock): after releasing SCL, the engine waits
-  until SCL reads back high (3-cycle latency) before starting the next
-  half-period, and re-arms the timer from that observed edge. That is
-  controller-side clock-stretch support. **Deferrable:** a controller without it
-  still works with targets that never stretch.
+- **CPHA = 0:** the first data bit is driven when the job is **posted**, before
+  the first leading edge (at least half a period of setup when the timer runs).
+- **Controller:** tick source = timer; the engine drives `CLK_LP`.
+- **Target:** tick source = the clock pin; **both** of its edges are ticks; the
+  engine does not drive the clock. Same sample/drive split as the controller.
+- **I2C SCL-release wait** (controller OD clock: wait until SCL reads back high
+  before the next half-period, re-arm from the observed edge): **deferred**.
+  Controllers without it still work with targets that never stretch.
 - **START/STOP** are `SET.T` sequences on the timer, never untimed `SET`.
 
-**Open for approval:** field placement (ECFG vs static setup) and the exact
-first-bit timing for CPHA = 0.
+**RTL sequencing:** Stage 2d (pin-edge ticks) merges into the engine-clock
+implementation step; single-edge pin ticks alone are not a separate freeze gate.
 
 ---
 
@@ -295,18 +398,23 @@ done:  WAIT   tick, stop       ; consumes tick k+10 (end of stop bit): no MISS
        JMP    idle
 ```
 
-### 5.2 UART RX (8N1) — 11 instructions
+### 5.2 UART RX (8N1) — 13 instructions
 
-Setup: LP0 = RX (input, 3-sample filter). Engine: DIN = LP0, LSB first. EV0 = RX
-falling edge; EV1 = RX high. `PHASE` = `PER`/2, so tick 0 falls in the middle of
-the start bit. Received bits are right-aligned in arrival order (SR[7:0] = data,
-SR[8] = stop).
+Setup: LP0 = RX (input, 3-sample filter). Engine: DOUT_LP = LP0 (`XFER in`
+samples DOUT_LP), LSB first. EV0 = RX
+falling edge (**LATCHED**); EV1 = RX high. `PHASE` = `PER`/2, so tick 0 falls in
+the middle of the start bit. Received bits are right-aligned in arrival order
+(SR[7:0] = data, SR[8] = stop). Clear EV0 pending after each frame so mid-frame
+falls (and a start edge that arrived during the XFER) are not mistaken for the
+next start, and a stale pending edge is not reused.
 
 ```
 start: WAIT   ev0, rearm       ; timer stopped while waiting, re-armed at the edge
        IN.T   rx               ; tick 0: is the line still low?
        JMP    C, start         ; no → a glitch, not a start bit
        XFER   9, in            ; ticks 1–9: 8 data bits + stop bit
+       LDI    r1, 0x01
+       MTS    EVCLR, r1        ; drop EV0 pending (caught start or stale)
        MFS    r0, RX           ; data byte; C := stop bit (always)
        JMP    NC, ferr
        PUSH   r0, DATA
@@ -391,7 +499,7 @@ pattern ticks make ineffective.
 | 2 | Timing by counting instructions and padding paths | Timed operations land on their tick, whatever path the program took |
 | 3 | The program cannot read the time | `MFS TIME`. An autobaud demo writes `PER` from a measured start bit |
 | 4 | Nothing protocol-aware | The bit engine handles bits (and clocks, §4); line coding in `ECFG` and CRC in a reserved opcode are deferred |
-| 5 | Complex protocols consume state machines and slots | UART TX 9, UART RX 11, SPI target 11 of 64 slots, with error reporting and streaming |
+| 5 | Complex protocols consume state machines and slots | UART TX 9, UART RX 13, SPI target 11 of 64 slots, with error reporting and streaming |
 | 6 | Pin windows only | Each logical pin maps independently to any physical pin; engine pins selectable |
 | 7 | Silent underflow stall | Running timer = strict region; `MISS` plus a per-context policy |
 | 8 | One condition, no timeout | 5-bit event mask with TICK as the timeout; EVF says which event ended the wait |
@@ -400,7 +508,7 @@ pattern ticks make ineffective.
 | 11 | No data path between state machines | **Still open** |
 | 12 | Error recovery needs the CPU | Traps, plus error-tagged words pushed to the host |
 
----
+--- 
 
 ## 7. Properties
 

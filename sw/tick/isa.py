@@ -84,6 +84,7 @@ class Spr(IntEnum):
     ECFG = 11
     PC = 12
     ID = 13
+    EVCLR = 14
 
 
 class MissPolicy(IntEnum):

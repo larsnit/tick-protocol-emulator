@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ def _iss_cfg(per: float = 8.0):
     }
 
 
-@cocotb.test()
+@cocotb.test(skip=os.environ.get("GATES") == "yes")
 async def lockstep_uart_tx(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     dut.ena.value = 1
@@ -62,15 +63,15 @@ async def lockstep_uart_tx(dut):
         await RisingEdge(dut.clk)
         iss.step()
 
-        rtl_pc = int(core.pc.value)
+        rtl_pc = int(core.dbg_pc.value)
         iss_pc = iss.ctx[0].pc
         rtl_pin = int(dut.uio_out.value) & 1 if int(dut.uio_oe.value) & 1 else 1
         iss_pin = iss.phys_drive[0] if iss.phys_oe[0] else 1
-        rtl_miss = int(core.miss.value)
+        rtl_miss = int(core.dbg_miss.value)
         iss_miss = int(iss.ctx[0].miss)
-        rtl_wait = int(core.waiting.value)
+        rtl_wait = int(core.dbg_waiting.value)
         iss_wait = int(iss.ctx[0].waiting)
-        rtl_ak = int(core.a_kind.value)
+        rtl_ak = int(core.dbg_a_kind.value)
         ta = iss.ctx[0].timed_active
         if ta is None:
             iss_ak = 0

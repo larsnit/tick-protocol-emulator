@@ -13,6 +13,11 @@ project:
   top_module:  "tt_um_larsnitschke_tick"
 
   source_files:
+    - "host_fifo.sv"
+    - "tick_imem.sv"
+    - "tick_timer.sv"
+    - "tick_queue.sv"
+    - "tick_issue.sv"
     - "tick_core.sv"
     - "tt_um_larsnitschke_tick.sv"
 

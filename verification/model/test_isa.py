@@ -352,6 +352,27 @@ def test_xfer_out_width_limit():
         encode_xfer(0, 9, XferMode.BOTH)
 
 
+def test_configure_applies_pinidle_to_drive():
+    """PINIDLE must update push-pull drive (PINMODE often lands first with idle default 1)."""
+    m = Machine()
+    m.load(
+        assemble("hang: JMP AL, hang\n"),
+        [
+            {
+                "pins": [
+                    {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 0},
+                    {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
+                ],
+            }
+        ],
+    )
+    c = m.ctx[0]
+    assert (c.drive_val & 0b101) == 0
+    m.step()
+    assert m.phys_oe[0] and m.phys_drive[0] == 0
+    assert m.phys_oe[2] and m.phys_drive[2] == 0
+
+
 def test_engine_clk_two_ticks_per_bit_cpha1():
     """Engine clock: with clk_en, each bit takes 2 ticks; CPHA=1 changes data on leading."""
     src = """
@@ -379,6 +400,9 @@ def test_engine_clk_two_ticks_per_bit_cpha1():
             }
         ],
     )
+    # CLK must start at CPOL idle (0) so the first leading edge is a rise.
+    m.step()
+    assert (m.phys_drive[2] if m.phys_oe[2] else 0) == 0
     trace_d, trace_c = [], []
     for _ in range(40):
         m.step()
@@ -410,3 +434,86 @@ def test_mfs_rx_always_sets_c_from_bit8():
     val = m._read_spr(c, Spr.RX)
     assert val == 0x55
     assert c.c is True
+
+
+def _edge_before_wait_cfg(*, latched: bool):
+    return {
+        "per": 8.0,
+        "phase": 0,
+        "tick_source": TickSource.TIMER,
+        "pins": [{"physical": 0, "mode": PinMode.INPUT, "idle": 1}],
+        "events": [{"kind": EventKind.EDGE_FALL, "pin": 0, "latched": latched}],
+    }
+
+
+def _run_edge_before_wait(*, latched: bool) -> Machine:
+    """Falling edge while still in pad NOPs; WAIT runs after the pulse is gone."""
+    # 16 NOPs ≫ sync delay so the pulse cycle cannot overlap WAIT.
+    nops = "\n".join(["ALU MOV r0, r0"] * 16)
+    src = f"""
+        {nops}
+    wait: WAIT ev0
+          LDI  r0, 0xA5
+          PUSH r0, DATA
+    hang: JMP  AL, hang
+    """
+    m = Machine()
+    m.load(assemble(src), [_edge_before_wait_cfg(latched=latched)])
+    m.phys_ext[0] = 1
+    for _ in range(4):
+        m.step()
+    # Edge while PC is still in the pad region.
+    m.phys_ext[0] = 0
+    for _ in range(40):
+        m.step()
+        if m.core_to_host:
+            break
+    return m
+
+
+def test_latched_edge_before_wait_is_caught():
+    m = _run_edge_before_wait(latched=True)
+    w = m.host_pop()
+    assert w is not None and w.data == 0xA5
+    assert m.ctx[0].ev_pending == 0
+
+
+def test_pulse_edge_before_wait_is_lost():
+    m = _run_edge_before_wait(latched=False)
+    assert m.host_pop() is None
+    assert m.ctx[0].waiting
+    assert m.ctx[0].ev_pending == 0
+
+
+def test_evclr_drops_stale_latched_edge():
+    from tick.isa import Spr
+
+    nops = "\n".join(["ALU MOV r0, r0"] * 12)
+    src = f"""
+        {nops}
+        LDI  r1, 0x01
+        MTS  EVCLR, r1
+    wait: WAIT ev0
+          LDI  r0, 0x5A
+          PUSH r0, DATA
+    hang: JMP  AL, hang
+    """
+    m = Machine()
+    m.load(assemble(src), [_edge_before_wait_cfg(latched=True)])
+    m.phys_ext[0] = 1
+    for _ in range(4):
+        m.step()
+    m.phys_ext[0] = 0
+    # Let the edge latch, then run through EVCLR and into WAIT.
+    for _ in range(40):
+        m.step()
+        if m.ctx[0].waiting:
+            break
+    assert m.ctx[0].waiting
+    assert m.ctx[0].ev_pending == 0
+    assert m._read_spr(m.ctx[0], Spr.EVCLR) == 0
+    # Stay in WAIT: stale edge must not fire.
+    for _ in range(20):
+        m.step()
+    assert m.host_pop() is None
+    assert m.ctx[0].waiting
