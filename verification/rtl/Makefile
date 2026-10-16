@@ -7,7 +7,7 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 THIS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SRC_DIR = $(THIS_DIR)../../src
-PROJECT_SOURCES = host_fifo.sv tick_imem.sv tick_timer.sv tick_queue.sv tick_issue.sv tick_core.sv tt_um_larsnitschke_tick.sv
+PROJECT_SOURCES = host_fifo.sv tick_imem.sv tick_cfg.sv tick_timer.sv tick_queue.sv tick_issue.sv tick_core.sv tt_um_larsnitschke_tick.sv
 
 ifneq ($(GATES),yes)
 
@@ -38,11 +38,19 @@ COMPILE_ARGS 		+= -I$(SRC_DIR)
 VERILOG_SOURCES += $(THIS_DIR)tb.v
 TOPLEVEL = tb
 
-# List test modules to run, separated by commas and without the .py suffix:
-COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz
+# Same list for RTL and gate-level (tt-gds-action gl_test uses this dir).
+# Pin-only modules (safe at GL): test_uart_tx, test_stage2a, test_uart_tx_pin3, …
+COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz,test_stage2a,test_uart_tx_pin3
 
 # Assembler / ISS live in sw/tick
 export PYTHONPATH := $(THIS_DIR)../../sw:$(PYTHONPATH)
 
+# Prefer project venv cocotb (CI and local).
+REPO_ROOT := $(THIS_DIR)../..
+COCOTB_CONFIG := $(shell \
+	if [ -x "$(REPO_ROOT)/.venv/bin/cocotb-config" ]; then \
+		echo "$(REPO_ROOT)/.venv/bin/cocotb-config"; \
+	else echo cocotb-config; fi)
+
 # include cocotb's make rules to take care of the simulator setup
-include $(shell cocotb-config --makefiles)/Makefile.sim
+include $(shell $(COCOTB_CONFIG) --makefiles)/Makefile.sim

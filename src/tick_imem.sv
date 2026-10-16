@@ -13,14 +13,13 @@ module tick_imem (
     output wire [15:0] rdata
 );
   reg [15:0] mem[0:63];
-  integer    ii;
 
   assign rdata = mem[raddr];
 
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin : seq_imem
     if (!rst_n) begin
-      for (ii = 0; ii < 64; ii = ii + 1)
-        mem[ii] <= 16'h0;
+      for (int i = 0; i < 64; i = i + 1)
+        mem[i] <= 16'h0;
     end else if (we) begin
       mem[waddr] <= wdata;
     end

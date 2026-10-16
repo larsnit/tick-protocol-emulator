@@ -111,21 +111,15 @@ done:  WAIT   tick, stop       ; consume end-of-stop tick
 
 ## Pinout (Tiny Tapeout)
 
-| Pins | Signal | Direction | Purpose |
+| Pins | Direction | `RUN=0` (load / cfg) | `RUN=1` (execute) |
 |---|---|---|---|
-| `ui[0]` | HOST_WR | in | Pulse to push host FIFO word |
-| `ui[1]` | HOST_RD | in | Pulse to pop host read data |
-| `ui[2]` | IMEM_WE | in | Pulse to write instruction word |
-| `ui[3]` | RUN | in | 1 = execute; 0 = load / idle |
-| `ui[7:4]` | CMD | in | Load command nibble (`0xA`…`0xE`) |
-| `uio[7:0]` | DATA / LP | bidir | Load data while `!RUN`; LP0 TX on `uio[0]` when running |
-| `uo[0]` | HOST_RDATA0 | out | Host read data LSB |
-| `uo[1]` | HOST_FULL | out | Host FIFO full |
-| `uo[2]` | HOST_EMPTY | out | Host FIFO empty |
-| `uo[3]` | WAITING | out | Context waiting |
-| `uo[4]` | MISS | out | Miss sticky |
-| `uo[5]` | TICK | out | Tick pulse |
-| `uo[6]` | PIN0_MIRROR | out | Mirror of LP0 |
+| `ui[0]` | in | HOST_WR (pulse push host FIFO) | same |
+| `ui[1]` | in | HOST_RD (pulse pop host read) | same |
+| `ui[2]` | in | IMEM_WE (pulse write instruction) | same |
+| `ui[3]` | in | RUN = 0 | RUN = 1 |
+| `ui[7:4]` | in | CMD nibble (`0x8`…`0xF`) | ignored for load |
+| `uio[7:0]` | bidir | load / cfg data (`uio_oe=0`) | logical pins (any of 8 via cfg pinmap) |
+| `uo[7:0]` | out | **cfg readback latch** (after CFG_RD `0x8`) | status: `{0, pin0, TICK, MISS, WAITING, HOST_EMPTY, HOST_FULL, HOST_RDATA0}` |
 
 While `!RUN`, `uio_oe = 0` so the host can drive the load bus. A 4-wire host SPI
 target on `ui`/`uo` is planned so all eight `uio` stay protocol-only.
@@ -133,15 +127,19 @@ target on `ui`/`uo` is planned so all eight `uio` stay protocol-only.
 ## Using the chip
 
 **Load** (with `RUN=0`): put a command nibble on `ui[7:4]` and data on `uio[7:0]`,
-then pulse the strobe:
+then pulse the strobe where needed:
 
 | CMD | Meaning | Strobe |
 |---|---|---|
+| `0x9` | config address | — |
+| `0xF` | config write (`uio` → `cfg[addr]`, then addr++) | rising edge of nibble |
+| `0x8` | config read → latch; `uo_out` mirrors the latch | rising edge of nibble |
 | `0xA` | instruction address | — |
 | `0xB` / `0xC` | instruction lo / hi byte | `IMEM_WE` (`ui[2]`) |
 | `0xD` / `0xE` | host word lo / flags | `HOST_WR` (`ui[0]`) |
 
-Then set `RUN=1` (`ui[3]`) to execute. Protocol pin for demos is `uio[0]`.
+Then set `RUN=1` (`ui[3]`) to execute. Logical pins map to any `uio[7:0]` via the
+config registers (demos often use `uio[0]`).
 
 **Waveforms:** `make test-rtl` writes `verification/rtl/tb.fst`. Open it in
 [Surfer](https://surfer-project.org/) or GTKWave.

@@ -1,6 +1,7 @@
 `default_nettype none
 
 // Formal wrapper with free inputs. Queue invariant catches timed-queue ordering bugs.
+// After reset, a small counter loads ENABLE + PINMODE(PP LP0) + PER via cfg port.
 module tick_formal_top (
     input wire        clk,
     input wire        rst_n,
@@ -11,37 +12,68 @@ module tick_formal_top (
     input wire        host_wr,
     input wire [9:0]  host_wdata,
     input wire        host_rd,
-    input wire        pin0_in
+    input wire [7:0]  uio_in
 );
   wire host_full, host_empty;
   wire [9:0] host_rdata;
   wire [5:0] dbg_pc;
   wire dbg_waiting, dbg_miss, dbg_tick, dbg_timer_run;
   wire [1:0] dbg_a_kind, dbg_p_kind;
-  wire pin0_out, pin0_oe;
+  wire [7:0] uio_out, uio_oe;
+  wire [7:0] cfg_rdata;
 
-  // Constant integer PER = 8.0 cycles
-  localparam [19:0] PER_FP = 20'd128;
+  reg        cfg_we, cfg_re;
+  reg [7:0]  cfg_addr, cfg_wdata;
+  reg [3:0]  init_cnt;
+  reg        init_done;
+
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      init_cnt  <= 4'd0;
+      init_done <= 1'b0;
+      cfg_we    <= 1'b0;
+      cfg_re    <= 1'b0;
+      cfg_addr  <= 8'h00;
+      cfg_wdata <= 8'h00;
+    end else begin
+      cfg_we <= 1'b0;
+      cfg_re <= 1'b0;
+      if (!init_done) begin
+        init_cnt <= init_cnt + 4'd1;
+        case (init_cnt)
+          4'd1: begin cfg_we <= 1'b1; cfg_addr <= 8'h12; cfg_wdata <= 8'h01; end // PINMODE (0x10+2)
+          4'd2: begin cfg_we <= 1'b1; cfg_addr <= 8'h19; cfg_wdata <= 8'h80; end // PER_L (0x10+9)
+          4'd3: begin cfg_we <= 1'b1; cfg_addr <= 8'h00; cfg_wdata <= 8'h01; end // ENABLE ctx0
+          4'd4: init_done <= 1'b1;
+          default: ;
+        endcase
+      end
+    end
+  end
+
+  wire run_g = run & init_done;
 
   tick_core uut (
       .clk(clk),
       .rst_n(rst_n),
-      .imem_we(imem_we),
+      .imem_we(imem_we & init_done),
       .imem_waddr(imem_waddr),
       .imem_wdata(imem_wdata),
-      .host_wr(host_wr),
+      .host_wr(host_wr & init_done),
       .host_wdata(host_wdata),
       .host_full(host_full),
       .host_rd(host_rd),
       .host_rdata(host_rdata),
       .host_empty(host_empty),
-      .run(run),
-      .cfg_per_fp(PER_FP),
-      .cfg_phase(16'd0),
-      .cfg_msb_first(1'b0),
-      .pin0_out(pin0_out),
-      .pin0_oe(pin0_oe),
-      .pin0_in(pin0_in),
+      .run(run_g),
+      .cfg_we(cfg_we),
+      .cfg_re(cfg_re),
+      .cfg_addr(cfg_addr),
+      .cfg_wdata(cfg_wdata),
+      .cfg_rdata(cfg_rdata),
+      .uio_in(uio_in),
+      .uio_out(uio_out),
+      .uio_oe(uio_oe),
       .dbg_pc(dbg_pc),
       .dbg_waiting(dbg_waiting),
       .dbg_miss(dbg_miss),
@@ -51,7 +83,6 @@ module tick_formal_top (
       .dbg_p_kind(dbg_p_kind)
   );
 
-  // Start in reset so anyinit cannot violate the invariant before rst.
   initial assume (!rst_n);
 
   reg saw_reset;
@@ -61,8 +92,6 @@ module tick_formal_top (
       saw_reset <= 1'b1;
   end
 
-  // Queue invariant: pending implies active occupied (pending ⇒ active).
-  // Only after a completed reset edge so flops are known.
   always @(posedge clk) begin
     if (rst_n && saw_reset) begin
       if (dbg_p_kind != 2'b00)
@@ -70,7 +99,6 @@ module tick_formal_top (
     end
   end
 
-  // Reset hygiene: one cycle after rst_n sampled low, state is clear.
   always @(posedge clk) begin
     if ($past(!rst_n) && saw_reset) begin
       assert (!dbg_miss);

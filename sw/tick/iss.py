@@ -911,7 +911,8 @@ class Machine:
         if cond == JmpCond.HE:
             return len(self.host_to_core) == 0
         if cond == JmpCond.ERR:
-            return c.miss or c.under or c.overrun or c.arb
+            # Any sticky ERR bit (MISS/UNDER/OVERRUN/ARB/MAP/CFG).
+            return bool(self._read_spr(c, Spr.ERR))
         if cond == JmpCond.ARB:
             return c.arb
         return False

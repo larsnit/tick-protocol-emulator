@@ -10,16 +10,10 @@
  *   ui_in[2]     : imem_we
  *   ui_in[3]     : run
  *   ui_in[7:4]   : load mux select
- *   uo_out[0]    : host_full
- *   uo_out[1]    : host_empty
- *   uo_out[2]    : dbg_waiting
- *   uo_out[3]    : dbg_miss
- *   uo_out[4]    : dbg_tick
- *   uo_out[5]    : pin0 mirror
- *   uio[7:0]     : all 8 reserved for protocol (LP0 on uio[0] today)
+ *   uo_out       : while !run = cfg readback latch; while run = status
+ *   uio[7:0]     : 8 protocol pins (logical pins mapped via config)
  *
- * Future host SPI target (deferred): SCLK/MOSI/CS_n/MISO on ui/uo;
- * keep parallel load for bring-up.
+ * Parallel cfg nibbles (docs/isa.md): 0x9 CFG_ADDR, 0xF CFG_WR, 0x8 CFG_RD.
  */
 
 `default_nettype none
@@ -38,46 +32,60 @@ module tt_um_larsnitschke_tick (
   wire imem_we = ui_in[2] & ~run;
   wire host_wr = ui_in[0] & ~run;
   wire host_rd = ui_in[1];
-
-  // When !run, uio_in carries load data:
-  // imem: {uio_in[7:0], ui_in[7:4], 4'h0 mixed} — use latched wide registers.
-  // Practical bring-up bus:
-  //   wdata_lo = uio_in
-  //   wdata_hi = previous latched nibble from ui[7:4] on prior cycle — TB drives
-  //   imem_waddr = latched addr on uio when ui[7:4]==0xA pattern
-  //
-  // Simplified fixed mapping for tests:
-  //   imem_wdata = {uio_in, uio_in} when loading? No — use 8-bit at a time with addr.
+  wire [3:0] nibble = ui_in[7:4];
 
   reg [5:0]  load_addr;
   reg [15:0] load_word;
   reg [9:0]  host_word;
   reg        prev_wr, prev_imem;
+  reg        prev_f, prev_8;
+  reg [7:0]  cfg_addr_latch;
+  reg [7:0]  cfg_rdata_latch;
+  reg        cfg_re_d;
 
   wire wr_pulse = host_wr & ~prev_wr;
   wire im_pulse = imem_we & ~prev_imem;
+  wire cfg_wr_pulse = (!run) & (nibble == 4'hF) & ~prev_f;
+  wire cfg_re_pulse = (!run) & (nibble == 4'h8) & ~prev_8;
+
+  wire [7:0] cfg_rdata;
+  wire [7:0] core_uio_out, core_uio_oe;
 
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       prev_wr <= 1'b0;
       prev_imem <= 1'b0;
+      prev_f <= 1'b0;
+      prev_8 <= 1'b0;
       load_addr <= 6'd0;
       load_word <= 16'h0;
       host_word <= 10'h0;
+      cfg_addr_latch <= 8'h00;
+      cfg_rdata_latch <= 8'h00;
+      cfg_re_d <= 1'b0;
     end else begin
       prev_wr <= host_wr;
       prev_imem <= imem_we;
-      // uio_in[5:0] = addr when ui_in[7:4]==4'hA and rising imem_we setup
-      if (!run && ui_in[7:4] == 4'hA)
+      prev_f <= (!run) & (nibble == 4'hF);
+      prev_8 <= (!run) & (nibble == 4'h8);
+      cfg_re_d <= cfg_re_pulse;
+      if (cfg_re_d)
+        cfg_rdata_latch <= cfg_rdata;
+
+      if (!run && nibble == 4'hA)
         load_addr <= uio_in[5:0];
-      if (!run && ui_in[7:4] == 4'hB)
+      if (!run && nibble == 4'hB)
         load_word[7:0] <= uio_in;
-      if (!run && ui_in[7:4] == 4'hC)
+      if (!run && nibble == 4'hC)
         load_word[15:8] <= uio_in;
-      if (!run && ui_in[7:4] == 4'hD)
+      if (!run && nibble == 4'hD)
         host_word[7:0] <= uio_in;
-      if (!run && ui_in[7:4] == 4'hE)
+      if (!run && nibble == 4'hE)
         host_word[9:8] <= uio_in[1:0];
+      if (!run && nibble == 4'h9)
+        cfg_addr_latch <= uio_in;
+      if (cfg_wr_pulse)
+        cfg_addr_latch <= cfg_addr_latch + 8'd1;
     end
   end
 
@@ -85,9 +93,9 @@ module tt_um_larsnitschke_tick (
   wire [9:0]  host_rdata;
   wire [5:0]  dbg_pc;
   wire        dbg_waiting, dbg_miss, dbg_tick;
-  wire        pin0_out, pin0_oe;
+  wire        dbg_timer_run;
+  wire [1:0]  dbg_a_kind, dbg_p_kind;
 
-  // Default PER = 8.0 → 8*16 = 128
   tick_core core (
       .clk(clk),
       .rst_n(rst_n),
@@ -101,28 +109,32 @@ module tt_um_larsnitschke_tick (
       .host_rdata(host_rdata),
       .host_empty(host_empty),
       .run(run),
-      .cfg_per_fp(20'd128),
-      .cfg_phase(16'd0),
-      .cfg_msb_first(1'b0),
-      .pin0_out(pin0_out),
-      .pin0_oe(pin0_oe),
-      .pin0_in(uio_in[0]),
+      .cfg_we(cfg_wr_pulse),
+      .cfg_re(cfg_re_pulse),
+      .cfg_addr(cfg_addr_latch),
+      .cfg_wdata(uio_in),
+      .cfg_rdata(cfg_rdata),
+      .uio_in(uio_in),
+      .uio_out(core_uio_out),
+      .uio_oe(core_uio_oe),
       .dbg_pc(dbg_pc),
       .dbg_waiting(dbg_waiting),
       .dbg_miss(dbg_miss),
       .dbg_tick(dbg_tick),
-      .dbg_timer_run(),
-      .dbg_a_kind(),
-      .dbg_p_kind()
+      .dbg_timer_run(dbg_timer_run),
+      .dbg_a_kind(dbg_a_kind),
+      .dbg_p_kind(dbg_p_kind)
   );
 
-  assign uo_out = {1'b0, pin0_out, dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]};
-  assign uio_out = {7'b0, pin0_out};
-  // Force pads high-Z while !run (host owns uio for parallel load).
-  assign uio_oe  = run ? {7'b0, pin0_oe} : 8'h00;
+  // !run: full-byte cfg readback. run: status (pin0 mirror on bit6).
+  assign uo_out = run
+      ? {1'b0, core_uio_out[0], dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]}
+      : cfg_rdata_latch;
 
-  wire _unused = &{ena, dbg_pc, host_rdata[9:1], 1'b0};
+  assign uio_out = core_uio_out;
+  assign uio_oe  = run ? core_uio_oe : 8'h00;
 
+  wire _unused = &{ena, dbg_pc, host_rdata[9:1], dbg_timer_run, dbg_a_kind, dbg_p_kind, 1'b0};
 endmodule
 
 `default_nettype wire

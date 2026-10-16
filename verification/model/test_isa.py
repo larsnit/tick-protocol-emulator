@@ -339,6 +339,62 @@ def test_wait_timeout_event_first():
     assert not (c.evf & 0x10)
 
 
+def test_jmp_err_on_map():
+    """JMP ERR must take when ERR.MAP is set (dual logical→physical map)."""
+    m = Machine()
+    m.load(
+        assemble(
+            """
+            LDI r0, 0
+            LDI r0, 0
+            JMP ERR, got
+            bad: SET lp2=1
+            hang: JMP AL, hang
+            got: SET lp0=0
+            hang2: JMP AL, hang2
+            """
+        ),
+        [
+            {
+                "per": 8.0,
+                "pins": [
+                    {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1},
+                    {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 0},
+                    {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
+                ],
+            }
+        ],
+    )
+    for _ in range(10):
+        m.step()
+    assert m.ctx[0].map_err
+    assert m.phys_oe[0] and m.phys_drive[0] == 0
+    assert not (m.phys_oe[2] and m.phys_drive[2] == 1)
+
+
+def test_jmp_err_on_cfg():
+    """JMP ERR must take when ERR.CFG is set (config write while enabled)."""
+    m = Machine()
+    m.load(
+        assemble(
+            """
+            JMP ERR, got
+            bad: SET lp0=1
+            hang: JMP AL, hang
+            got: SET lp0=0
+            hang2: JMP AL, hang2
+            """
+        ),
+        [{"per": 8.0, "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}]}],
+    )
+    # Write PINMODE while enabled → sticky CFG.
+    m.cfg_write(0x12, 0x00)
+    assert m.ctx[0].cfg_err
+    for _ in range(8):
+        m.step()
+    assert m.phys_oe[0] and m.phys_drive[0] == 0
+
+
 def test_xfer_out_width_limit():
     """XFER width limits: out/both capped at 8; in may be 9–16."""
     import pytest

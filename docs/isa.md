@@ -174,7 +174,7 @@ Byte address space with a **read port and a write port**:
 
 **Flat addressing (no CTX_SEL):** shared registers below `0x10`; context 0 at
 `0x10`–`0x2F`; context 1 at `0x30`–`0x4F`. Offset within a context block is
-`addr & 0x1F` (same layout for both).
+`address − context base` (same layout for both).
 
 **Reset:** every context **disabled**; every logical pin **input** (OE off).
 `PER`/`PHASE` reset to implementation defaults (e.g. PER=8.0); other fields 0.

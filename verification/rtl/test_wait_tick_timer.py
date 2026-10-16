@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 import cocotb
 from cocotb.clock import Clock
-from cocotb.triggers import ClockCycles, RisingEdge
+from cocotb.triggers import RisingEdge
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import Machine, PinMode, TickSource, assemble
-from test_uart_tx import load_program
+from rtl_bus import load_default_cfg, load_program, reset_dut
 
 K_VALUES = (0, 1, 3, 5)
 
@@ -50,13 +49,8 @@ def iss_first_edge(k: int) -> int:
 
 
 async def rtl_first_edge(dut, k: int) -> int:
-    dut.ena.value = 1
-    dut.ui_in.value = 0
-    dut.uio_in.value = 0
-    dut.rst_n.value = 0
-    await ClockCycles(dut.clk, 3)
-    dut.rst_n.value = 1
-    await ClockCycles(dut.clk, 2)
+    await reset_dut(dut)
+    await load_default_cfg(dut)
     await load_program(dut, assemble(_src(k)))
     dut.ui_in.value = 1 << 3
     prev = None
@@ -76,7 +70,6 @@ async def wait_tick_timer_guard(dut):
     """SET.T; k×NOP; WAIT tick; SET.T — first edge matches ISS for every k."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     iss_edges = {k: iss_first_edge(k) for k in K_VALUES}
-    # Path-independence on the ISS itself.
     assert len(set(iss_edges.values())) == 1, iss_edges
     ref = next(iter(iss_edges.values()))
 
@@ -88,5 +81,4 @@ async def wait_tick_timer_guard(dut):
     assert len(set(rtl_edges.values())) == 1, (
         f"RTL first edge moved with padding: {rtl_edges} (ISS stays at {ref})"
     )
-    # Align ISS→RTL: cocotb RisingEdge after run is +1 vs ISS step index.
     assert rtl_edges[0] == ref + 1, (rtl_edges, ref)

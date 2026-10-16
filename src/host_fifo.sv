@@ -24,7 +24,6 @@ module host_fifo #(
   reg [WIDTH-1:0] mem_q [0:DEPTH-1];
   reg [AW-1:0]    wptr_q, rptr_q;
   reg [AW-1:0]    wptr_d, rptr_d;
-  integer         ii;
 
   assign full  = ((wptr_q + {{(AW-1){1'b0}}, 1'b1}) == rptr_q);
   assign empty = (wptr_q == rptr_q);
@@ -39,12 +38,12 @@ module host_fifo #(
       rptr_d = rptr_q + {{(AW-1){1'b0}}, 1'b1};
   end
 
-  always @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin : seq_fifo
     if (!rst_n) begin
       wptr_q <= {AW{1'b0}};
       rptr_q <= {AW{1'b0}};
-      for (ii = 0; ii < DEPTH; ii = ii + 1)
-        mem_q[ii] <= {WIDTH{1'b0}};
+      for (int i = 0; i < DEPTH; i = i + 1)
+        mem_q[i] <= {WIDTH{1'b0}};
     end else begin
       if (wr && !full)
         mem_q[wptr_q] <= wdata;
