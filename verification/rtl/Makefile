@@ -40,7 +40,7 @@ TOPLEVEL = tb
 
 # Same list for RTL and gate-level (tt-gds-action gl_test uses this dir).
 # Pin-only modules (safe at GL): test_uart_tx, test_stage2a, test_uart_tx_pin3, …
-COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz,test_stage2a,test_uart_tx_pin3
+COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz,test_stage2a,test_stage2b,test_cmd_dispatch,test_uart_tx_pin3,test_repro_mts_ecfg_clk_en,test_repro_trial1,test_repro_trial177
 
 # Assembler / ISS live in sw/tick
 export PYTHONPATH := $(THIS_DIR)../../sw:$(PYTHONPATH)

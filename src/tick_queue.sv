@@ -23,6 +23,8 @@ module tick_queue (
     input  wire [1:0]  dout_lp,
     input  wire [1:0]  din_lp,
     input  wire        host_data,
+    // Bit i set when EVi kind is HOST_DATA (Stage 2b soft host-event waits).
+    input  wire [3:0]  host_ev_kind,
     input  wire        waiting,
     input  wire [4:0]  wait_mask,
     input  wire [1:0]  wait_tc,
@@ -55,6 +57,9 @@ module tick_queue (
     output reg  [1:0]  a_kind,
     output reg  [1:0]  p_kind,
     output reg         miss,
+    // Same-cycle miss pulse/sticky (after-tick at_miss, before miss_clear) so
+    // JMP ERR sees MISS the cycle it is set without a miss_clear combo loop.
+    output wire        miss_comb,
     output reg         res_valid,
     output reg  [15:0] result,
     output reg  [7:0]  uio_out,
@@ -63,6 +68,8 @@ module tick_queue (
     output wire [7:0]  uio_out_comb,
     output wire [7:0]  uio_oe_comb,
     output reg         err_map_set,
+    output reg         err_overrun_set,
+    output reg         err_arb_set,
     output wire        in_t_done,
     output wire        in_t_bit
 );
@@ -111,11 +118,13 @@ module tick_queue (
   reg [7:0]  a_data_d, p_data_d;
   reg [15:0] a_res_d;
   reg        miss_d, res_valid_d;
+  assign miss_comb = at_miss;
   reg [15:0] result_d;
   reg [3:0]  drv_val_d, drv_oe_d;
 
   reg [7:0]  map_out, map_oe;
   reg        map_err;
+  reg        overrun_pulse, arb_pulse;
   reg [1:0]  mode_i, mode_b;
   reg        bit_i, bit_b, oe_i, driving;
   reg [2:0]  phys_i;
@@ -182,6 +191,8 @@ module tick_queue (
     sample_lp = 2'd0;
     mode_a = 2'd0;
     bit_a = 1'b0;
+    overrun_pulse = 1'b0;
+    arb_pulse = 1'b0;
 
     if (!run) begin
       at_drv_val = pinidle;
@@ -196,7 +207,8 @@ module tick_queue (
       else if (pm3 == PM_OD) begin at_drv_oe[3] = ~pinidle[3]; at_drv_val[3] = 1'b0; end
     end else begin
       if (waiting && !pull_block && !mfs_block &&
-          (at_a_k == 2'd3 || at_p_k == 2'd3) && wait_mask[0] && host_data) begin
+          (at_a_k == 2'd3 || at_p_k == 2'd3) &&
+          host_data && |(wait_mask[3:0] & host_ev_kind)) begin
         if (at_a_k == 2'd3) begin
           at_a_k = at_p_k;
           at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
@@ -279,7 +291,13 @@ module tick_queue (
               if (at_a_msb) at_a_res = {at_a_res[14:0], lp_in[sample_lp]};
               else at_a_res[at_a_done] = lp_in[sample_lp];
             end
+            // ARB: BOTH + OD DOUT, drive-1 (release) but sync readback is 0
+            if (at_a_mode == 2'd2 && pm_of(dout_lp) == PM_OD &&
+                outb == 1'b1 && lp_in[dout_lp] == 1'b0)
+              arb_pulse = 1'b1;
             if (at_a_done == at_a_nm1) begin
+              if (at_res_valid)
+                overrun_pulse = 1'b1;
               if (at_a_mode == 2'd0) at_result = {8'h0, at_a_data};
               else at_result = at_a_res;
               at_res_valid = 1'b1;
@@ -440,6 +458,8 @@ module tick_queue (
       uio_out <= 8'h00;
       uio_oe <= 8'h00;
       err_map_set <= 1'b0;
+      err_overrun_set <= 1'b0;
+      err_arb_set <= 1'b0;
     end else begin
       a_kind <= a_kind_d; p_kind <= p_kind_d;
       a_oe_q <= a_oe_d; p_oe_q <= p_oe_d;
@@ -459,6 +479,8 @@ module tick_queue (
       uio_out <= map_out;
       uio_oe  <= run ? map_oe : 8'h00;
       err_map_set <= map_err;
+      err_overrun_set <= overrun_pulse;
+      err_arb_set <= arb_pulse;
     end
   end
 endmodule

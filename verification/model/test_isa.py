@@ -573,3 +573,73 @@ def test_evclr_drops_stale_latched_edge():
         m.step()
     assert m.host_pop() is None
     assert m.ctx[0].waiting
+
+
+def test_soft_wait_ev0_ignores_host_unless_host_data_kind():
+    """WAIT ev0 with LEVEL_HIGH must not complete merely because the host FIFO has data."""
+    cfg = {
+        "per": 4.0,
+        "pins": [
+            {"physical": 0, "mode": PinMode.OPENDRAIN, "idle": 0},
+            {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 1},
+            {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
+        ],
+        "events": [{"kind": EventKind.LEVEL_HIGH}],
+    }
+    src = """
+    LDI r1, 12
+    settle: JMP r1--, settle
+    WAIT ev0
+    SET.E lp2=0
+    hang: JMP AL, hang
+    """
+    m = Machine()
+    m.load(assemble(src), [cfg])
+    m.host_push(0x11)
+    for _ in range(40):
+        m.step()
+    assert m.ctx[0].waiting
+    assert (m.ctx[0].drive_oe >> 2) & 1  # SET.E not reached
+
+    cfg2 = dict(cfg)
+    cfg2["events"] = [{"kind": EventKind.HOST_DATA}]
+    m2 = Machine()
+    m2.load(assemble(src), [cfg2])
+    m2.host_push(0x22)
+    for _ in range(40):
+        m2.step()
+    assert not m2.ctx[0].waiting
+    assert not ((m2.ctx[0].drive_oe >> 2) & 1)
+
+
+def test_jmp_sees_same_cycle_wait_and_in_t_flags():
+    """JMP TK after WAIT tick and JMP C after IN.T see same-cycle updates."""
+    cfg = {
+        "per": 4.0,
+        "pins": [
+            {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
+            {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
+            {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
+        ],
+    }
+    src = """
+    WAIT tick
+    JMP TK, got_tk
+    bad_tk: JMP AL, bad_tk
+    got_tk:
+    IN.T lp0
+    JMP C, got_c
+    bad_c: JMP AL, bad_c
+    got_c: SET lp2=1
+    hang: JMP AL, hang
+    """
+    m = Machine()
+    m.load(assemble(src), [cfg])
+    for _ in range(80):
+        m.phys_ext = [1, 0, 0, 0, 0, 0, 0, 0]
+        m.step()
+        if m.phys_oe[2] and m.phys_drive[2]:
+            break
+    assert m.phys_oe[2] and m.phys_drive[2]

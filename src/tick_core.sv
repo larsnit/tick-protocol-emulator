@@ -99,12 +99,12 @@ module tick_core (
   wire [7:0]  ev0_cfg, ev0_trap, ev1_cfg, ev1_trap;
   wire [7:0]  ev2_cfg, ev2_trap, ev3_cfg, ev3_trap;
   wire [7:0]  err_bits;
-  wire        err_map_set;
+  wire        err_map_set, err_under_set, err_overrun_set, err_arb_set;
   wire        err_clear;
   wire [7:0]  err_clear_mask;
-  wire        per_we, phase_we, phase_hi, msb_we, msb_wdata;
+  wire        per_we, phase_we, phase_hi, ecfg_we;
   wire [1:0]  per_sel;
-  wire [7:0]  per_wdata, phase_wdata;
+  wire [7:0]  per_wdata, phase_wdata, ecfg_wdata;
 
   tick_cfg u_cfg (
       .clk(clk),
@@ -120,9 +120,12 @@ module tick_core (
       .phase_we(phase_we),
       .phase_hi(phase_hi),
       .phase_wdata(phase_wdata),
-      .msb_we(msb_we),
-      .msb_wdata(msb_wdata),
+      .ecfg_we(ecfg_we),
+      .ecfg_wdata(ecfg_wdata),
       .err_map_set(err_map_set),
+      .err_under_set(err_under_set),
+      .err_overrun_set(err_overrun_set),
+      .err_arb_set(err_arb_set),
       .err_clear(err_clear),
       .err_clear_mask(err_clear_mask),
       .err_bits(err_bits),
@@ -208,8 +211,6 @@ module tick_core (
   );
 
   // ---- Pin sync path (READBACK_LATENCY=3 → own delay 1 + sync depth 2) ----
-  // Own delay samples combinational drive (not the pad register) so total
-  // latency stays 3, matching ISS _OWN_SAMPLE_DELAY + _SYNC_DEPTH.
   wire [7:0] q_uio_out, q_uio_oe, q_uio_out_c, q_uio_oe_c;
   reg  [7:0] own_d;
   reg  [7:0] sync0, sync1;
@@ -230,7 +231,6 @@ module tick_core (
       own_d <= q_uio_out_c;
       sync0 <= pin_raw;
       sync1 <= sync0;
-      // maj0 tracks the value sync1 becomes this cycle (ISS maj_hist[0]=sync1)
       maj0  <= sync0;
       maj1  <= maj0;
       maj2  <= maj1;
@@ -260,7 +260,7 @@ module tick_core (
   wire [1:0]  at_a_kind, at_p_kind;
   wire        at_slots_full;
   wire        event_wait_done, tick_wait_done;
-  wire        miss, res_valid;
+  wire        miss, miss_comb, res_valid;
   wire [15:0] result;
   wire [1:0]  a_kind, p_kind;
   wire        waiting;
@@ -276,6 +276,13 @@ module tick_core (
   wire [3:0]  pin_mask, pin_val4;
   wire        in_t_done, in_t_bit;
   wire        host_data = !tx_empty;
+  // EventKind.HOST_DATA = 6 (docs/isa.md / sw/tick/iss.py)
+  wire [3:0]  host_ev_kind = {
+      (ev3_cfg[3:0] == 4'd6),
+      (ev2_cfg[3:0] == 4'd6),
+      (ev1_cfg[3:0] == 4'd6),
+      (ev0_cfg[3:0] == 4'd6)
+  };
 
   tick_queue u_queue (
       .clk(clk),
@@ -296,6 +303,7 @@ module tick_core (
       .dout_lp(dout_lp),
       .din_lp(din_lp),
       .host_data(host_data),
+      .host_ev_kind(host_ev_kind),
       .waiting(waiting),
       .wait_mask(wait_mask),
       .wait_tc(wait_tc),
@@ -328,6 +336,7 @@ module tick_core (
       .a_kind(a_kind),
       .p_kind(p_kind),
       .miss(miss),
+      .miss_comb(miss_comb),
       .res_valid(res_valid),
       .result(result),
       .uio_out(q_uio_out),
@@ -335,6 +344,8 @@ module tick_core (
       .uio_out_comb(q_uio_out_c),
       .uio_oe_comb(q_uio_oe_c),
       .err_map_set(err_map_set),
+      .err_overrun_set(err_overrun_set),
+      .err_arb_set(err_arb_set),
       .in_t_done(in_t_done),
       .in_t_bit(in_t_bit)
   );
@@ -352,11 +363,18 @@ module tick_core (
       .tick_wait_done(tick_wait_done),
       .timer_run(timer_run),
       .cfg_msb_first(msb_first),
+      .cfg_clk_en(clk_en),
+      .cfg_cpha(cpha),
+      .cfg_cpol(cpol),
+      .default_byte(default_byte),
+      .time_cnt(time_cnt),
       .lp_in(lp_in),
       .in_t_done(in_t_done),
       .in_t_bit(in_t_bit),
-      .err_bits({err_bits[7:1], miss | err_bits[0]}),
+      // miss_comb: same-cycle MISS (ISS applies tick before JMP); sticky miss_q lags 1 cy.
+      .err_bits({err_bits[7:1], miss_comb | err_bits[0]}),
       .tx_empty(tx_empty),
+      .host_ev_kind(host_ev_kind),
       .tx_rdata(tx_rdata),
       .tx_rd(tx_rd),
       .rx_full(rx_full),
@@ -368,6 +386,7 @@ module tick_core (
       .miss_clear(miss_clear),
       .err_clear(err_clear),
       .err_clear_mask(err_clear_mask),
+      .err_under_set(err_under_set),
       .post_en(post_en),
       .post_kind(post_kind),
       .post_oe(post_oe),
@@ -392,8 +411,8 @@ module tick_core (
       .phase_we(phase_we),
       .phase_hi(phase_hi),
       .phase_wdata(phase_wdata),
-      .msb_we(msb_we),
-      .msb_wdata(msb_wdata),
+      .ecfg_we(ecfg_we),
+      .ecfg_wdata(ecfg_wdata),
       .pc(pc),
       .waiting(waiting),
       .wait_mask_obs(wait_mask),
@@ -410,9 +429,9 @@ module tick_core (
   assign dbg_a_kind    = a_kind;
   assign dbg_p_kind    = p_kind;
 
-  wire _unused = &{time_cnt, per_fp_obs, phase_cfg_obs, cfg_base, cfg_bound,
-                   clk_lp, clk_en, cpol, cpha, tick_src, tick_rise, tick_pin,
-                   miss_pol, miss_vec, default_byte, ev0_cfg, ev0_trap,
+  wire _unused = &{per_fp_obs, phase_cfg_obs, cfg_base, cfg_bound,
+                   clk_lp, tick_src, tick_rise, tick_pin,
+                   miss_pol, miss_vec, ev0_cfg, ev0_trap,
                    ev1_cfg, ev1_trap, ev2_cfg, ev2_trap, ev3_cfg, ev3_trap, 1'b0};
 endmodule
 

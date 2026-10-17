@@ -251,7 +251,7 @@ Two logical pins → one physical: **lower LP index wins**; sticky `ERR.MAP`
 | WAIT | `WAIT evmask[, tc]` | Block until any selected event (EV0–3, TICK); EVF records which. With TICK it's a queue entry (rule 6). An empty mask means sleep until a trap |
 | JMP | `JMP cond, addr` | Conditional jump (see §3.1) |
 | LDI | `LDI rd, imm8` | Load immediate |
-| ALU | `ALU fn rd, rs` | MOV, ADD, SUB, AND, OR, XOR, CMP, SHR; sets Z and C |
+| ALU | `ALU fn rd, rs` | MOV, ADD, SUB, AND, OR, XOR, CMP, SHR; flags per §3.0 |
 | XFER | `XFER [rs,] n, mode` | Post a bit-engine job: `out` and `both` 1–8 bits (from rs), `in` 1–16 bits. One bit per tick (two with the engine clock on), entirely in hardware |
 | PULL | `PULL[.NB] rd` | Read from the host FIFO; sets LAST/CMD. `.NB` applies the empty-FIFO policy instead of blocking |
 | PUSH | `PUSH rs, tag` | Write to the host FIFO. Tags: DATA, EOF, ERR, EVT |
@@ -283,7 +283,42 @@ Two logical pins → one physical: **lower LP index wins**; sticky `ERR.MAP`
 | 12 | CMD | Last PULL was a command byte |
 | 13 | HE | Host FIFO empty (non-blocking check) |
 | 14 | ERR | Any sticky error |
-| 15 | ARB | A driven bit read back differently during the last XFER (I2C/CAN arbitration) |
+| 15 | ARB | Sticky `ERR.ARB` is set (see sticky errors below) |
+
+**Flag visibility to `JMP`:** a `JMP` reads the architectural flags as they stand at
+issue time. Flags written by a prior instruction (ALU, LDI, IN, PULL, MFS, …)
+are visible on the **next** issued instruction (next cycle when the context is
+not stalled). When a wait completes in the same cycle — `IN.T` sample, tick-`WAIT`,
+or a soft host-data `WAIT` — the ISS applies that completion **before** issuing
+the next instruction; so a `JMP` that issues in that same cycle sees the updated
+`Z`/`C`/`EVF`. (The RTL mirrors this by feeding `JMP` from the same-cycle
+`z_d`/`c_d`/`evf_d` update path.) The same rule covers sticky `MISS`: a timer tick
+with an empty timed queue sets `MISS` before issue, so `JMP ERR` in that cycle
+takes. Soft host-data wake-ups must not clear a `MFS RX` / `PULL` block.
+
+### 3.0 ALU flags
+
+| Fn | Writes `rd` | Z | C |
+|---|---|---|---|
+| MOV | yes | `rd == 0` | **cleared** |
+| ADD | yes | `rd == 0` | unsigned carry out |
+| SUB | yes | `rd == 0` | **borrow** (`rd_old < rs`) |
+| AND / OR / XOR | yes | `rd == 0` | **cleared** |
+| CMP | **no** | `(rd − rs) & 0xFF == 0` | **borrow** (`rd < rs`) |
+| SHR | yes | `rd == 0` | bit shifted out (old LSB) |
+
+### Sticky errors (detail)
+
+| Bit | Name | Set when |
+|---|---|---|
+| 0 | MISS | Timed queue miss (policy FLAG) |
+| 1 | UNDER | `PULL.NB` on an empty host FIFO |
+| 2 | OVERRUN | A second XFER result completes while the previous is still unread (`MFS RX` has not taken it) |
+| 3 | ARB | During `XFER both` on an **open-drain** DOUT pin: engine drives 1 but the synchronised pin read-back is 0 (same sample path / read-back latency as `IN`) |
+| 4 | MAP | Dual logical→physical pin map |
+| 5 | CFG | Config write while the context is enabled (or clock-pin mismatch) |
+
+`JMP ERR` takes iff any sticky bit is set. `MTS ERR` is write-1-to-clear (only bits written as 1 clear).
 
 ### 3.2 Special registers (4 bits)
 
@@ -295,13 +330,25 @@ Two logical pins → one physical: **lower LP index wins**; sticky `ERR.MAP`
 | 3 | TIME_H | R | High byte of the latched value |
 | 4 | EVF | R | Events recorded by the last WAIT |
 | 5 | ERR | R/W | Sticky errors (MISS, UNDER, OVERRUN, ARB, MAP, CFG); write 1 to clear |
-| 6–8 | PER_L/M/H | W | Tick period, 20.4 fixed point |
-| 9–10 | PHASE_L/H | W | Offset of tick 0 after a re-arm |
-| 11 | ECFG | R/W | Engine config: bit order, line code (clock fields live in the configuration register map, not here) |
+| 6–8 | PER_L/M/H | W | Tick period, 20.4 fixed point (alias of the config-map PER bytes) |
+| 9–10 | PHASE_L/H | W | Offset of tick 0 after a re-arm (alias of the config-map PHASE bytes) |
+| 11 | ECFG | R/W | **Alias of the engine fields in the configuration map** (see below) |
 | 12 | PC | R/W | Write = computed jump (host command dispatch) |
 | 13 | ID | R | Version, instruction-memory size, context count |
-| 14 | EVCLR | R/W | R: latched-edge pending flags `[3:0]` = EV0–EV3. W: write 1 to clear pending bits |
+| 14 | EVCLR | R/W | R: latched-edge pending flags `[3:0]` = EV0–EV3. W: write 1 to clear pending. **Until Stage 2c (latching):** reads as 0; writes ignored |
 | 15 | — | — | Reserved |
+
+**ECFG layout (SPR 11)** — same storage as config `ENGINE` / `CLKCFG`, not a copy:
+
+| Bit | Field | Config map home |
+|---|---|---|
+| 0 | `MSB_FIRST` | `ENGINE[6]` |
+| 1 | `CLK_EN` | `ENGINE[7]` |
+| 2 | `CPHA` | `CLKCFG[1]` |
+| 3 | `CPOL` | `CLKCFG[0]` |
+| 4–7 | reserved (line coding) | read 0; writes ignored |
+
+`MTS ECFG` writes those fields; `MFS ECFG` and a host config readback see the same values. **Bit order (`MSB_FIRST`) is captured per job when the XFER is posted.** Clock fields (`CLK_EN`/`CPOL`/`CPHA`) take effect as the ISS applies them; changing them while jobs are queued is **not** something programs should rely on.
 
 ### 3.3 Encoding
 
@@ -351,11 +398,15 @@ MTS   1010 ss rrrr ------
 The engine drove only one data pin, so the SPI and I2C controller programs never
 toggled a clock.
 
-**Configuration fields** (configuration register map, **not** ECFG): `CLK_EN`,
-`CLK_LP` (logical pin), `CPOL`, `CPHA`, plus engine pins `DOUT_LP`, `DIN_LP`.
+**Configuration fields** live in the configuration register map (`ENGINE`,
+`CLKCFG`, pin roles). **`ECFG` (SPR 11) is an alias of those engine fields**
+(`MSB_FIRST`, `CLK_EN`, `CPHA`, `CPOL`) — same principle as `PER`/`PHASE`.
+`CLK_LP`, `DOUT_LP`, and `DIN_LP` are config-map only (not in the ECFG nibble).
 
 **Behaviour:** with `CLK_EN` set, **each XFER bit takes two ticks**, a leading
 and a trailing one. `PER` is therefore half a bit period (bit rate = f_clk / (2 · PER)).
+(Engine-clock RTL lands with Stage 2d; until then `CLK_EN` is stored and
+visible via ECFG/config readback but does not yet split ticks.)
 
 | | Leading tick | Trailing tick |
 |---|---|---|

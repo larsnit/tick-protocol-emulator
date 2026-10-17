@@ -10,7 +10,7 @@ from cocotb.triggers import ClockCycles, RisingEdge
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
-from tick import PinMode, TickSource  # noqa: E402
+from tick import EventKind, PinMode, TickSource  # noqa: E402
 from tick.cfg import dict_to_bytes  # noqa: E402
 
 
@@ -27,6 +27,7 @@ DEFAULT_CFG = {
         {"physical": 2, "mode": PinMode.INPUT, "idle": 1},
         {"physical": 3, "mode": PinMode.INPUT, "idle": 1},
     ],
+    "events": [{"kind": EventKind.HOST_DATA}],
 }
 
 

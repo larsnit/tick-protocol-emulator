@@ -114,7 +114,10 @@ def dict_to_bytes(ci: int, cfg: dict[str, Any], enable_mask: int | None = None) 
     events = cfg.get("events", [])
     for ei in range(4):
         e = events[ei] if ei < len(events) else {}
-        kind = int(e.get("kind", 1)) & 0xF
+        # Default EV0 to HOST_DATA (6): matches uart_*.asm / Stage 2b soft WAIT bit0.
+        # Other selectors default to LEVEL_HIGH (1).
+        default_kind = 6 if ei == 0 else 1
+        kind = int(e.get("kind", default_kind)) & 0xF
         pin = int(e.get("pin", 0)) & 3
         qual = int(e.get("qual_pin", 1)) & 3
         out[base + OFF_EV0_CFG + 2 * ei] = kind | (pin << 4) | (qual << 6)

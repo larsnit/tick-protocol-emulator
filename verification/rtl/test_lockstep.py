@@ -34,14 +34,15 @@ def _iss_cfg(per: float = 8.0):
 async def lockstep_uart_tx(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await reset_dut(dut)
-    await load_default_cfg(dut)
+    cfg = _iss_cfg(8.0)
+    await load_default_cfg(dut, cfg)
 
     words = assemble((ROOT / "sw" / "programs" / "uart_tx.asm").read_text())
     await load_program(dut, words)
     await push_host(dut, 0x55, last=True)
 
     iss = Machine()
-    iss.load(words, [_iss_cfg(8.0)])
+    iss.load(words, [cfg])
     iss.host_push(0x55, last=True)
 
     dut.ui_in.value = 1 << 3

@@ -10,7 +10,7 @@ from cocotb.triggers import RisingEdge
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
-from tick import PinMode, assemble
+from tick import EventKind, PinMode, assemble
 from rtl_bus import load_default_cfg, load_program, push_host, reset_dut
 
 
@@ -30,6 +30,7 @@ async def test_uart_tx_phys3(dut):
                 {"physical": 2, "mode": PinMode.INPUT, "idle": 1},
                 {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
             ],
+            "events": [{"kind": EventKind.HOST_DATA}],
         },
     )
     words = assemble((ROOT / "sw" / "programs" / "uart_tx.asm").read_text())

@@ -881,7 +881,9 @@ class Machine:
 
         if op == Op.MTS:
             self._write_spr(c, d["spr"], c.regs[d["rs"]])
-            c.pc = next_pc
+            # MTS PC is a computed jump: write_spr sets pc; do not advance.
+            if d["spr"] != Spr.PC:
+                c.pc = next_pc
             return
 
     def _eval_cond(self, c: Context, cond: int) -> bool:

@@ -4,6 +4,7 @@
 // Flat addr: shared 0x00–0x0F, ctx0 0x10–0x2F, ctx1 0x30–0x4F (stored; unused in 2a).
 // Writes to an enabled context are ignored and set ERR.CFG.
 // PER/PHASE live here and are shared with MTS (timer reads these registers).
+// ECFG (MTS SPR11) aliases ENGINE[7:6] and CLKCFG[1:0].
 module tick_cfg (
     input  wire        clk,
     input  wire        rst_n,
@@ -19,12 +20,15 @@ module tick_cfg (
     input  wire        phase_we,
     input  wire        phase_hi,
     input  wire [7:0]  phase_wdata,
-    // MTS ECFG bit0 → ENGINE.MSB_FIRST (same register as config map)
-    input  wire        msb_we,
-    input  wire        msb_wdata,
-    // Sticky errors from pin dual-map / cfg violations
+    // MTS ECFG → ENGINE[6]/MSB, [7]/CLK_EN, CLKCFG[1]/CPHA, [0]/CPOL
+    input  wire        ecfg_we,
+    input  wire [7:0]  ecfg_wdata,
+    // Sticky errors
     input  wire        err_map_set,
-    input  wire        err_clear,       // MTS ERR write-1-to-clear (bits in err_clear_mask)
+    input  wire        err_under_set,
+    input  wire        err_overrun_set,
+    input  wire        err_arb_set,
+    input  wire        err_clear,       // MTS ERR write-1-to-clear
     input  wire [7:0]  err_clear_mask,
     output wire [7:0]  err_bits,
     // Decoded ctx0
@@ -56,7 +60,7 @@ module tick_cfg (
     output wire [5:0]  base,
     output wire [5:0]  bound,
     output wire [3:0]  glitch,
-    // Event selectors (store only in 2a; behaviour in 2c). Latched = TRAP[7].
+    // Event selectors (store only; behaviour in 2c). Latched = TRAP[7].
     output wire [7:0]  ev0_cfg,
     output wire [7:0]  ev0_trap,
     output wire [7:0]  ev1_cfg,
@@ -68,7 +72,7 @@ module tick_cfg (
 );
   // Shared
   reg [1:0]  enable_q;
-  reg        err_map_q, err_cfg_q;
+  reg        err_map_q, err_cfg_q, err_under_q, err_overrun_q, err_arb_q;
 
   // Ctx0 block (offsets as in docs)
   reg [7:0]  c0_pinmap_lo, c0_pinmap_hi, c0_pinmode, c0_pinidle;
@@ -79,7 +83,7 @@ module tick_cfg (
   reg [7:0]  c0_ev0_cfg, c0_ev0_trap, c0_ev1_cfg, c0_ev1_trap;
   reg [7:0]  c0_ev2_cfg, c0_ev2_trap, c0_ev3_cfg, c0_ev3_trap;
 
-  // Ctx1 storage (written/readable; unused by single-context engine in 2a)
+  // Ctx1 storage (written/readable; unused by single-context engine in 2a/2b)
   reg [7:0]  c1_mem [0:31];
 
   assign enable0     = enable_q[0];
@@ -118,12 +122,12 @@ module tick_cfg (
   assign ev2_trap    = c0_ev2_trap;
   assign ev3_cfg     = c0_ev3_cfg;
   assign ev3_trap    = c0_ev3_trap;
-  assign err_bits    = {2'b0, err_cfg_q, err_map_q, 4'b0};
-  // Stored full bytes; only used fields are decoded above.
-  wire _unused_cfg = &{err_clear_mask[7:6], err_clear_mask[3:0],
+  // bit0 MISS is OR'd in core from queue; cfg holds UNDER/OVERRUN/ARB/MAP/CFG
+  assign err_bits    = {2'b0, err_cfg_q, err_map_q, err_arb_q, err_overrun_q, err_under_q, 1'b0};
+  wire _unused_cfg = &{err_clear_mask[7:6], err_clear_mask[0],
                        c0_pinidle[7:4], c0_clkcfg[7:2], c0_tick[7:4],
                        c0_per_h[7:4], c0_base[7:6], c0_bound[7:6],
-                       c0_glitch[7:4], 1'b0};
+                       c0_glitch[7:4], ecfg_wdata[7:4], 1'b0};
 
   function automatic [7:0] read_c0(input [7:0] off);
     begin
@@ -163,6 +167,9 @@ module tick_cfg (
       enable_q   <= 2'b00;
       err_map_q  <= 1'b0;
       err_cfg_q  <= 1'b0;
+      err_under_q <= 1'b0;
+      err_overrun_q <= 1'b0;
+      err_arb_q  <= 1'b0;
       cfg_rdata  <= 8'h00;
       c0_pinmap_lo <= 8'h10; // LP0=0, LP1=1
       c0_pinmap_hi <= 8'h32; // LP2=2, LP3=3
@@ -194,7 +201,16 @@ module tick_cfg (
     end else begin
       if (err_map_set)
         err_map_q <= 1'b1;
+      if (err_under_set)
+        err_under_q <= 1'b1;
+      if (err_overrun_set)
+        err_overrun_q <= 1'b1;
+      if (err_arb_set)
+        err_arb_q <= 1'b1;
       if (err_clear) begin
+        if (err_clear_mask[1]) err_under_q <= 1'b0;
+        if (err_clear_mask[2]) err_overrun_q <= 1'b0;
+        if (err_clear_mask[3]) err_arb_q <= 1'b0;
         if (err_clear_mask[4]) err_map_q <= 1'b0;
         if (err_clear_mask[5]) err_cfg_q <= 1'b0;
       end
@@ -212,8 +228,12 @@ module tick_cfg (
         if (phase_hi) c0_phase_h <= phase_wdata;
         else          c0_phase_l <= phase_wdata;
       end
-      if (msb_we)
-        c0_engine[6] <= msb_wdata;
+      if (ecfg_we) begin
+        c0_engine[6] <= ecfg_wdata[0]; // MSB_FIRST
+        c0_engine[7] <= ecfg_wdata[1]; // CLK_EN
+        c0_clkcfg[1] <= ecfg_wdata[2]; // CPHA
+        c0_clkcfg[0] <= ecfg_wdata[3]; // CPOL
+      end
 
       if (cfg_re) begin
         if (cfg_addr == 8'h00)
@@ -221,7 +241,6 @@ module tick_cfg (
         else if (cfg_addr < 8'h10)
           cfg_rdata <= 8'h00;
         else if (cfg_addr < 8'h30)
-          // Offset = addr - 0x10 (ISS); not addr[4:0] (0x18 would alias GLITCH)
           cfg_rdata <= read_c0(cfg_addr - 8'h10);
         else if (cfg_addr < 8'h50)
           cfg_rdata <= c1_mem[cfg_addr[4:0]];
@@ -269,7 +288,6 @@ module tick_cfg (
           if (enable_q[1])
             err_cfg_q <= 1'b1;
           else
-            // 0x30–0x4F: low 5 bits are the offset (0x00–0x1F)
             c1_mem[cfg_addr[4:0]] <= cfg_wdata;
         end
       end
