@@ -80,7 +80,9 @@ module tick_timer (
         time_cnt_d   = 16'h0;
         phase_left_d = phase_cfg;
       end
-      if (start && !timer_run_q) begin
+      // Use !timer_run_d (after stop), not !timer_run_q: trap stop + same-cycle
+      // SET.T start must restart (ISS; fuzz trial83).
+      if (start && !timer_run_d) begin
         timer_run_d  = 1'b1;
         accum_d      = 20'h0;
         time_cnt_d   = 16'h0;

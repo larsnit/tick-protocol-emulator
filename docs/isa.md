@@ -49,25 +49,40 @@ executable reference.
 3. **A timed action happens on its tick cycle**, plus a fixed output delay L,
    whatever instructions ran in between. **This is the headline property.**
    **Read-back latency** (constant `READBACK_LATENCY` in `sw/tick/isa.py`, value 3):
-   - Every input passes through **2 synchroniser flip-flops**. An external pin
-     change during cycle *M* is first visible to logic (IN, IN.T, XFER samples,
-     events, pin-edge ticks) in cycle *M+2*.
+   - Every use of an input pin goes through **one path**: the same 2 synchroniser
+     flip-flops, then the same optional 3-sample majority glitch filter when that
+     logical pin has the filter enabled. There is no second, faster path for
+     events vs `IN` / `IN.T` / XFER samples / pin-edge ticks.
+   - An external pin change during cycle *M* is first visible to that shared logic
+     in cycle *M+2*. With the glitch filter on, the majority needs one extra
+     agreeing sample, so visibility is cycle *M+3*.
    - A context's own output, changed by an instruction in cycle *N*, is first
      visible to an IN in cycle *N+3* (one cycle of own-drive feedback delay into
-     the same 2-flop synchroniser path).
+     the same 2-flop synchroniser path; glitch filter adds the same extra cycle
+     when enabled).
 4. **A stopped timer restarts in one of two ways:**
    - at an event: `WAIT ev, rearm` sets tick 0 to event time + `PHASE`. The
      hardware does this at the event cycle, not when the instruction resumes;
-   - at the first timed operation posted (this includes a tick-`WAIT`):
-     tick 0 = post time + `PHASE`.
+   - at the first timed operation posted (this includes a tick-`WAIT`, and a
+     `SET.T` / `IN.T` / `XFER` posted by a trap vector in the trap cycle):
+     tick 0 = post time + `PHASE`. When `PHASE = 0` there is no phase countdown
+     — tick 0 is one `PER` after the post (period accumulator from zero). When
+     `PHASE ≥ 1`, tick 0 is exactly `PHASE` cycles after the post.
 5. **A tick that passes with nothing in the active slot, while the timer runs,
    sets `MISS`.** A per-context policy decides what happens next:
    - *flag and continue*: stay on the tick grid;
-   - *trap*: cancel the queue, drive pins to their idle values, push an error to
-     the host;
+   - *trap*: cancel the queue, drive pins to their idle values, **stop the
+     timer** (clear phase leftover and period accumulator — phase is not
+     preserved), and push an error to the host. Event traps do the same stop.
+     If the trap vector itself posts a timed op (`SET.T` / `IN.T` / `XFER` /
+     tick-`WAIT`) in that same cycle, the post **restarts** the timer under
+     rule 4: tick 0 = post time + `PHASE` (`PHASE = 0` means no phase delay,
+     so tick 0 is one `PER` after the post). Stop and start in the same cycle
+     must both take effect;
    - *send default*: e.g. 0xFF for an SPI target;
-   - *stretch*: hold the (open-drain) clock low until a job arrives; for an I2C
-     target.
+   - *stretch*: hold **only** the configured clock logical pin (`CLK_LP`) low
+     (open-drain drive-0) until a timed job is consumed (SET.T / IN.T / XFER /
+     tick-WAIT); other open-drain pins are untouched. Used e.g. for an I2C target.
 6. **Tick-`WAIT` rules:**
    - **Completion by tick:** when the wait entry is active and its tick arrives,
      the tick is consumed, `EVF.TICK` is set, `tc` is applied, and there is **no
@@ -125,17 +140,31 @@ executable reference.
     checking that cycle, the edge is lost.
   - **LATCHED:** the edge sets a per-event *pending* flag. Pending is cleared
     when (1) a `WAIT` ends and reports that event in `EVF`, (2) the program
-    writes 1 to that bit in `EVCLR` (SPR 14), or (3) a trap is taken.
+    writes 1 to that bit in `EVCLR` (SPR 14), or (3) **that event's** trap is
+    taken (only that bit; other pending flags stay). Pending flags are also
+    cleared when **RUN rises** (host `ui[3]` 0→1). On that rising edge the
+    synchroniser / glitch-filter pipeline and the edge detectors' previous-sample
+    state all snap to the current pin levels, so load-bus traffic (and sync
+    settling from reset onto idle drives) while `RUN=0` cannot leave a stale
+    level, a phantom edge, or a pending flag for the first instruction. **Pin**
+    event traps (level / edge / qualified edge) are also suppressed on that
+    rising-RUN cycle (combo live still sees pre-snap levels); `HOST_DATA` and
+    `HOST_SPACE` traps are **not** suppressed — they do not use the pin path.
+    The ISS applies the same snap when a context enable bit rises.
   - Level events and host-data / host-space are never latched (they are levels).
   - Traps still fire from the live edge on the cycle it occurs; they do not wait
-    on pending, and taking a trap clears all pending flags.
+    on pending.
+  - **Same-cycle trap priority:** event traps beat the MISS trap; among events,
+    the lower event number wins. `EVF` reports the winning event. A MISS trap
+    clears no latched pending flags.
 
 ### Shared
 - 64 × 16-bit instruction memory, split between the contexts by base/bound
   registers.
 - Host FIFOs of 10-bit words: 8 data bits + LAST + CMD.
 - A free-running cycle counter.
-- 2-flop synchronisers and optional 3-sample majority filters on all inputs.
+- 2-flop synchronisers and optional 3-sample majority filters on all inputs
+  (one shared path for every consumer — see read-back latency above).
 - Scheduling: one instruction issued per cycle. Enabled contexts take turns;
   a waiting or disabled context is skipped. With one enabled context, it issues
   every cycle.
@@ -335,7 +364,7 @@ takes. Soft host-data wake-ups must not clear a `MFS RX` / `PULL` block.
 | 11 | ECFG | R/W | **Alias of the engine fields in the configuration map** (see below) |
 | 12 | PC | R/W | Write = computed jump (host command dispatch) |
 | 13 | ID | R | Version, instruction-memory size, context count |
-| 14 | EVCLR | R/W | R: latched-edge pending flags `[3:0]` = EV0–EV3. W: write 1 to clear pending. **Until Stage 2c (latching):** reads as 0; writes ignored |
+| 14 | EVCLR | R/W | R: latched-edge pending flags `[3:0]` = EV0–EV3. W: write 1 to clear pending |
 | 15 | — | — | Reserved |
 
 **ECFG layout (SPR 11)** — same storage as config `ENGINE` / `CLKCFG`, not a copy:

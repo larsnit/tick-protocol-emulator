@@ -7,7 +7,7 @@ FST ?= -fst # Use more efficient FST format
 TOPLEVEL_LANG ?= verilog
 THIS_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 SRC_DIR = $(THIS_DIR)../../src
-PROJECT_SOURCES = host_fifo.sv tick_imem.sv tick_cfg.sv tick_timer.sv tick_queue.sv tick_issue.sv tick_core.sv tt_um_larsnitschke_tick.sv
+PROJECT_SOURCES = host_fifo.sv tick_imem.sv tick_cfg.sv tick_timer.sv tick_events.sv tick_queue.sv tick_issue.sv tick_core.sv tt_um_larsnitschke_tick.sv
 
 ifneq ($(GATES),yes)
 
@@ -40,7 +40,7 @@ TOPLEVEL = tb
 
 # Same list for RTL and gate-level (tt-gds-action gl_test uses this dir).
 # Pin-only modules (safe at GL): test_uart_tx, test_stage2a, test_uart_tx_pin3, …
-COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz,test_stage2a,test_stage2b,test_cmd_dispatch,test_uart_tx_pin3,test_repro_mts_ecfg_clk_en,test_repro_trial1,test_repro_trial177
+COCOTB_TEST_MODULES = test_uart_tx,test_queue_order,test_lockstep,test_wait_tick_timer,test_iss_rtl_fuzz,test_stage2a,test_stage2b,test_cmd_dispatch,test_uart_tx_pin3,test_repro_mts_ecfg_clk_en,test_repro_trial1,test_repro_trial177,test_rtl_events_traps_miss,test_uart_rx,test_idle_drive_before_run_no_false_edge,test_miss_send_default_lsb,test_pin_input_latency,test_repro_trap_stretch_oe,test_repro_trial24_oe,test_repro_set_e_after_miss_od,test_repro_host_trap_on_run_rise,test_repro_pin_trap_suppress_run_rise,test_repro_trap_sett_timer_restart,test_repro_trial83,test_repro_no_phantom_qual_after_run_rise
 
 # Assembler / ISS live in sw/tick
 export PYTHONPATH := $(THIS_DIR)../../sw:$(PYTHONPATH)

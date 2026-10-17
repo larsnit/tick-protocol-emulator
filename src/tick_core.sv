@@ -34,16 +34,7 @@ module tick_core (
 );
   wire [15:0] instr;
   wire [5:0]  pc;
-
-  tick_imem u_imem (
-      .clk(clk),
-      .rst_n(rst_n),
-      .we(imem_we),
-      .waddr(imem_waddr),
-      .wdata(imem_wdata),
-      .raddr(pc),
-      .rdata(instr)
-  );
+  // fetch_pc / imem placed after trap sources (Icarus: no use-before-declare).
 
   wire       tx_full, tx_empty, rx_full, rx_empty;
   wire [9:0] tx_rdata, rx_rdata_c;
@@ -219,21 +210,37 @@ module tick_core (
   wire [7:0] pin_raw;
   wire [3:0] lp_in;
 
+  // RUN rising: snap the whole sync/majority pipeline to pin_raw (ISS enable
+  // snap). Otherwise load-bus residue still in sync1/filt makes LEVEL_* traps
+  // fire before the post-run inputs have propagated.
+  reg run_q_sync;
+  wire run_rise_sync = internal_run & ~run_q_sync;
+
   always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      own_d <= 8'hFF;
-      sync0 <= 8'hFF;
-      sync1 <= 8'hFF;
-      maj0  <= 8'hFF;
-      maj1  <= 8'hFF;
-      maj2  <= 8'hFF;
+      own_d      <= 8'hFF;
+      sync0      <= 8'hFF;
+      sync1      <= 8'hFF;
+      maj0       <= 8'hFF;
+      maj1       <= 8'hFF;
+      maj2       <= 8'hFF;
+      run_q_sync <= 1'b0;
     end else begin
+      run_q_sync <= internal_run;
       own_d <= q_uio_out_c;
-      sync0 <= pin_raw;
-      sync1 <= sync0;
-      maj0  <= sync0;
-      maj1  <= maj0;
-      maj2  <= maj1;
+      if (run_rise_sync) begin
+        sync0 <= pin_raw;
+        sync1 <= pin_raw;
+        maj0  <= pin_raw;
+        maj1  <= pin_raw;
+        maj2  <= pin_raw;
+      end else begin
+        sync0 <= pin_raw;
+        sync1 <= sync0;
+        maj0  <= sync0;
+        maj1  <= maj0;
+        maj2  <= maj1;
+      end
     end
   end
 
@@ -253,6 +260,14 @@ module tick_core (
   assign lp_in[1] = glitch[1] ? filt[pmap1_w] : sync1[pmap1_w];
   assign lp_in[2] = glitch[2] ? filt[pmap2_w] : sync1[pmap2_w];
   assign lp_in[3] = glitch[3] ? filt[pmap3_w] : sync1[pmap3_w];
+
+  // RUN-rise edge detector prev-sample: map pin_raw (sync snap target). Glitch
+  // majority of three identical samples is the sample itself.
+  wire [3:0] lp_snap;
+  assign lp_snap[0] = pin_raw[pmap0_w];
+  assign lp_snap[1] = pin_raw[pmap1_w];
+  assign lp_snap[2] = pin_raw[pmap2_w];
+  assign lp_snap[3] = pin_raw[pmap3_w];
 
   assign uio_out = q_uio_out;
   assign uio_oe  = q_uio_oe;
@@ -276,19 +291,50 @@ module tick_core (
   wire [3:0]  pin_mask, pin_val4;
   wire        in_t_done, in_t_bit;
   wire        host_data = !tx_empty;
-  // EventKind.HOST_DATA = 6 (docs/isa.md / sw/tick/iss.py)
-  wire [3:0]  host_ev_kind = {
-      (ev3_cfg[3:0] == 4'd6),
-      (ev2_cfg[3:0] == 4'd6),
-      (ev1_cfg[3:0] == 4'd6),
-      (ev0_cfg[3:0] == 4'd6)
-  };
+  wire        host_space = !rx_full;
+  wire [3:0]  ev_live, ev_wait, ev_pending;
+  wire        event_trap_req;
+  wire [5:0]  event_trap_vec;
+  wire [3:0]  event_trap_bit;
+  wire        miss_trap_req;
+  wire        pending_clear_en;
+  wire [3:0]  pending_clear_mask;
+  wire        stretching_obs;
+  // Event traps suppress tick consume this cycle (ISS: trap before emit).
+  wire        tick_eff = tick & ~event_trap_req;
+  wire        trap_cancel = event_trap_req;
+
+  tick_events u_events (
+      .clk(clk),
+      .rst_n(rst_n),
+      .run(internal_run),
+      .lp_in(lp_in),
+      .lp_snap(lp_snap),
+      .host_data(host_data),
+      .host_space(host_space),
+      .ev0_cfg(ev0_cfg),
+      .ev0_trap(ev0_trap),
+      .ev1_cfg(ev1_cfg),
+      .ev1_trap(ev1_trap),
+      .ev2_cfg(ev2_cfg),
+      .ev2_trap(ev2_trap),
+      .ev3_cfg(ev3_cfg),
+      .ev3_trap(ev3_trap),
+      .pending_clear_en(pending_clear_en),
+      .pending_clear_mask(pending_clear_mask),
+      .ev_live(ev_live),
+      .ev_wait(ev_wait),
+      .ev_pending(ev_pending),
+      .trap_req(event_trap_req),
+      .trap_vec(event_trap_vec),
+      .trap_ev_bit(event_trap_bit)
+  );
 
   tick_queue u_queue (
       .clk(clk),
       .rst_n(rst_n),
       .run(internal_run),
-      .tick(tick),
+      .tick(tick_eff),
       .timer_run(timer_run),
       .lp_in(lp_in),
       .pinmode0(pinmode0),
@@ -302,8 +348,12 @@ module tick_core (
       .pinidle(pinidle),
       .dout_lp(dout_lp),
       .din_lp(din_lp),
-      .host_data(host_data),
-      .host_ev_kind(host_ev_kind),
+      .clk_lp(clk_lp),
+      .miss_pol(miss_pol),
+      .default_byte(default_byte),
+      .cfg_msb_first(msb_first),
+      .ev_wait(ev_wait),
+      .trap_cancel(trap_cancel),
       .waiting(waiting),
       .wait_mask(wait_mask),
       .wait_tc(wait_tc),
@@ -347,7 +397,23 @@ module tick_core (
       .err_overrun_set(err_overrun_set),
       .err_arb_set(err_arb_set),
       .in_t_done(in_t_done),
-      .in_t_bit(in_t_bit)
+      .in_t_bit(in_t_bit),
+      .miss_trap_req(miss_trap_req),
+      .stretching_obs(stretching_obs)
+  );
+
+  // On trap, ISS redirects PC then issues the vector insn in the same cycle.
+  wire [5:0] fetch_pc = event_trap_req ? event_trap_vec
+                      : (miss_trap_req ? miss_vec : pc);
+
+  tick_imem u_imem (
+      .clk(clk),
+      .rst_n(rst_n),
+      .we(imem_we),
+      .waddr(imem_waddr),
+      .wdata(imem_wdata),
+      .raddr(fetch_pc),
+      .rdata(instr)
   );
 
   tick_issue u_issue (
@@ -374,7 +440,13 @@ module tick_core (
       // miss_comb: same-cycle MISS (ISS applies tick before JMP); sticky miss_q lags 1 cy.
       .err_bits({err_bits[7:1], miss_comb | err_bits[0]}),
       .tx_empty(tx_empty),
-      .host_ev_kind(host_ev_kind),
+      .ev_wait(ev_wait),
+      .ev_pending(ev_pending),
+      .trap_req(event_trap_req),
+      .trap_vec(event_trap_vec),
+      .trap_ev_bit(event_trap_bit),
+      .miss_trap_req(miss_trap_req),
+      .miss_vec(miss_vec),
       .tx_rdata(tx_rdata),
       .tx_rd(tx_rd),
       .rx_full(rx_full),
@@ -418,7 +490,9 @@ module tick_core (
       .wait_mask_obs(wait_mask),
       .wait_tc_obs(wait_tc),
       .pull_block_obs(pull_block),
-      .mfs_block_obs(mfs_block)
+      .mfs_block_obs(mfs_block),
+      .pending_clear_en(pending_clear_en),
+      .pending_clear_mask(pending_clear_mask)
   );
 
   assign dbg_pc        = pc;
@@ -430,9 +504,7 @@ module tick_core (
   assign dbg_p_kind    = p_kind;
 
   wire _unused = &{per_fp_obs, phase_cfg_obs, cfg_base, cfg_bound,
-                   clk_lp, tick_src, tick_rise, tick_pin,
-                   miss_pol, miss_vec, ev0_cfg, ev0_trap,
-                   ev1_cfg, ev1_trap, ev2_cfg, ev2_trap, ev3_cfg, ev3_trap, 1'b0};
+                   tick_src, tick_rise, tick_pin, ev_live, stretching_obs, 1'b0};
 endmodule
 
 `default_nettype wire

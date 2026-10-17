@@ -178,6 +178,9 @@ class Machine:
         self.double_drive = False
         self.trace: list[dict] = []
         self.enable_trace = False
+        # After enable/RUN-rise snap: suppress pin traps for one step (RTL
+        # run_rise); HOST_DATA / HOST_SPACE still fire.
+        self._pin_trap_suppress = False
         # Flat config image (docs/isa.md §2.1); ENABLE at 0x00.
         self.cfg_mem = [0] * 0x50
         self.cfg_addr = 0
@@ -210,6 +213,29 @@ class Machine:
             mask &= ~(1 << ci)
         self.cfg_write(0x00, mask)
 
+    def _snap_inputs_after_enable(self) -> None:
+        """Match RTL RUN-rise: settle sync to idle drives; clear pending; no edge.
+
+        Sync flops reset to 1; push-pull idle=0 then feeds the sample path and
+        would look like EDGE_FALL without this snap (RTL settles while !run and
+        clears pending / snaps lp_prev on RUN rise — docs/isa.md).
+        """
+        self._apply_drives()
+        cur = [self.phys_drive[q] & 1 for q in range(8)]
+        self._own_delay = [list(cur) for _ in self._own_delay]
+        self._pin_sample = self._sample_pins_for_sync()
+        for p in range(8):
+            s = self._pin_sample[p] & 1
+            self._sync0[p] = s
+            self._sync1[p] = s
+            self._sync_prev[p] = s
+            self._maj_hist[p] = [s, s, s]
+            self._filt[p] = s
+            self._filt_prev[p] = s
+        for c in self.ctx:
+            c.ev_pending = 0
+        self._pin_trap_suppress = True
+
     def cfg_write(self, addr: int, val: int) -> None:
         """Write one config byte (same rules as the RTL config port)."""
         from . import cfg as C
@@ -217,9 +243,13 @@ class Machine:
         addr &= 0xFF
         val &= 0xFF
         if addr == C.ADDR_ENABLE:
+            prev = self.cfg_mem[addr] & 3
             self.cfg_mem[addr] = val & 3
             for i in range(N_CONTEXTS):
                 self.ctx[i].enabled = bool(val & (1 << i))
+            # Rising enable on any context → snap inputs (RTL RUN-rise analogue).
+            if (val & 3) & ~prev:
+                self._snap_inputs_after_enable()
             return
         if addr < 0x10 or addr >= 0x50:
             return
@@ -515,9 +545,11 @@ class Machine:
             return
         op = c.timed_active
         if op.kind == "set":
+            self._end_stretch(c)
             self._do_set(c, op.mask, op.val, oe=op.oe)
             self._promote(c)
         elif op.kind == "in":
+            self._end_stretch(c)
             c.c = bool(self._logical_in(c, op.lp))
             c.z = not c.c
             c.evf |= 1 << 4
@@ -538,7 +570,15 @@ class Machine:
                 c.result_valid = True
                 self._promote(c)
         elif op.kind == "wait":
-            c.evf = 1 << 4
+            # Tick consumed; OR any same-cycle events in the mask (docs rule 6a).
+            self._end_stretch(c)
+            fired = 1 << 4
+            ev_now = self._event_mask_now(c)
+            for ei in range(N_EVENTS):
+                if (op.wait_mask & (1 << ei)) and (ev_now & (1 << ei)):
+                    fired |= 1 << ei
+            c.evf = fired
+            self._clear_ev_pending(c, fired)
             c.waiting = False
             if op.wait_tc == WaitTc.REARM:
                 self._start_timer(c)
@@ -552,8 +592,12 @@ class Machine:
         elif tc in (WaitTc.STOP, WaitTc.IDLE):
             self._stop_timer(c)
 
-    def _try_event_complete_wait(self, c: Context) -> bool:
-        """Event-first dequeue of a timed WAIT (non-tick events)."""
+    def _try_event_complete_wait(self, c: Context, tick: bool = False) -> bool:
+        """Event-first dequeue of a timed WAIT (non-tick events).
+
+        If this cycle also has a tick and the wait mask includes TICK, skip:
+        ``_on_tick`` consumes the tick and ORs event bits into EVF (docs 6a).
+        """
         if not c.waiting or c.pull_block is not None or c.mfs_rx is not None:
             return False
         where = None
@@ -563,6 +607,8 @@ class Machine:
         elif c.timed_pending is not None and c.timed_pending.kind == "wait":
             where, op = "p", c.timed_pending
         if op is None:
+            return False
+        if tick and (op.wait_mask & (1 << 4)):
             return False
         fired = 0
         ev_now = self._event_mask_now(c)
@@ -597,10 +643,11 @@ class Machine:
                     self._promote(c)
         elif c.miss_policy == MissPolicy.STRETCH:
             c.stretching = True
-            for li, p in enumerate(c.pins):
-                if p.mode == PinMode.OPENDRAIN:
-                    c.drive_val &= ~(1 << li)
-                    c.drive_oe |= 1 << li
+            # Hold only the configured clock logical pin low (open-drain).
+            clk = c.clk_lp & 3
+            if c.pins[clk].mode == PinMode.OPENDRAIN:
+                c.drive_val &= ~(1 << clk)
+                c.drive_oe |= 1 << clk
 
     def _drive_lp(self, c: Context, lp: int, bit: int, oe: bool = True) -> None:
         mode = c.pins[lp].mode
@@ -638,13 +685,18 @@ class Machine:
         shift = (remaining - 1) if job.msb_first else job.bits_done
         return (job.data >> shift) & 1
 
+    def _end_stretch(self, c: Context) -> None:
+        """Release MISS stretch when a timed job is consumed (docs: until a job arrives)."""
+        if not c.stretching:
+            return
+        c.stretching = False
+        clk = c.clk_lp & 3
+        if c.pins[clk].mode == PinMode.OPENDRAIN:
+            c.drive_oe &= ~(1 << clk)
+
     def _engine_bit(self, c: Context, job: Optional[Job]) -> None:
         assert job is not None
-        if c.stretching:
-            c.stretching = False
-            for li, p in enumerate(c.pins):
-                if p.mode == PinMode.OPENDRAIN:
-                    c.drive_oe &= ~(1 << li)
+        self._end_stretch(c)
 
         if c.ecfg_clk_en:
             # Engine clock: two ticks per bit.
@@ -698,7 +750,8 @@ class Machine:
                     c.arb = True
         job.bits_done += 1
 
-    def _do_trap(self, c: Context, vector: int) -> None:
+    def _do_trap(self, c: Context, vector: int, *, clear_pending: int = 0) -> None:
+        """Trap: cancel queue, idle pins, PC:=vector. Clear only clear_pending latched bits."""
         c.pc = vector & 0x3F
         c.waiting = False
         c.timed_active = None
@@ -706,7 +759,7 @@ class Machine:
         c.stretching = False
         c.pull_block = None
         c.mfs_rx = None
-        c.ev_pending = 0
+        self._clear_ev_pending(c, clear_pending)
         self._stop_timer(c)
         for li, p in enumerate(c.pins):
             if p.mode == PinMode.INPUT:
@@ -1065,11 +1118,17 @@ class Machine:
         self._apply_wait_tc(c, c.wait_tc)
 
     def _check_traps(self, c: Context) -> None:
+        # Same-cycle priority: lower event index wins; EVF reports the winner.
+        # Clears only that event's latched pending (MISS traps clear none).
+        # Pin traps skipped for one cycle after enable snap (docs RUN-rise).
         for ei, e in enumerate(c.events):
-            if e.trap and self._event_active(c, ei):
-                self._do_trap(c, e.vector)
-                c.evf = 1 << ei
-                return
+            if not (e.trap and self._event_active(c, ei)):
+                continue
+            if self._pin_trap_suppress and e.kind.value < EventKind.HOST_DATA.value:
+                continue
+            self._do_trap(c, e.vector, clear_pending=(1 << ei))
+            c.evf = 1 << ei
+            return
 
     def _sample_pins_for_sync(self) -> list[int]:
         """Levels captured at end of cycle for the next cycle's synchroniser."""
@@ -1106,6 +1165,7 @@ class Machine:
                 continue
             self._update_ev_pending(c)
             self._check_traps(c)
+        self._pin_trap_suppress = False
 
         ticks = []
         for c in self.ctx:
@@ -1122,7 +1182,8 @@ class Machine:
             if not c.enabled:
                 continue
             # Event-first: dequeue timed WAIT on non-tick events before the tick.
-            self._try_event_complete_wait(c)
+            # Same-cycle event+tick (mask includes TICK) is handled in _on_tick.
+            self._try_event_complete_wait(c, tick=ticks[ci])
             if ticks[ci]:
                 self._on_tick(c)
             # Soft event waits / PULL / MFS (tick-bearing WAIT handled above).

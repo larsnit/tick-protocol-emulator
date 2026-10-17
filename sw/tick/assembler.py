@@ -180,7 +180,15 @@ def _assemble_one(line: str, labels: dict[str, int], pc: int) -> int:
             ev_tok = " ".join(args[:-1])
         else:
             ev_tok = " ".join(args)
-        return encode_wait(TC_NAMES[tc_name], _evmask(ev_tok))
+        mask = _evmask(ev_tok)
+        tc = TC_NAMES[tc_name]
+        # Illegal: TICK with tc=rearm/idle (stops the timer the WAIT is waiting on).
+        if (mask & (1 << 4)) and tc_name in ("rearm", "idle"):
+            raise ValueError(
+                "WAIT with tick and tc=rearm/idle is illegal "
+                "(would stop the timer being waited on)"
+            )
+        return encode_wait(tc, mask)
 
     if base == "jmp":
         if len(args) == 1:

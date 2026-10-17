@@ -17,6 +17,7 @@ project:
     - "tick_imem.sv"
     - "tick_cfg.sv"
     - "tick_timer.sv"
+    - "tick_events.sv"
     - "tick_queue.sv"
     - "tick_issue.sv"
     - "tick_core.sv"

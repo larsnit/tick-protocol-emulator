@@ -10,6 +10,7 @@ SRC_SV := \
 	$(REPO)/src/tick_imem.sv \
 	$(REPO)/src/tick_cfg.sv \
 	$(REPO)/src/tick_timer.sv \
+	$(REPO)/src/tick_events.sv \
 	$(REPO)/src/tick_queue.sv \
 	$(REPO)/src/tick_issue.sv \
 	$(REPO)/src/tick_core.sv \

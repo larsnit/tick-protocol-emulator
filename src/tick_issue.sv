@@ -25,8 +25,14 @@ module tick_issue (
     input  wire        in_t_bit,
     input  wire [7:0]  err_bits,
     input  wire        tx_empty,
-    // Soft WAIT: bit i completes on host data when EVi kind is HOST_DATA.
-    input  wire [3:0]  host_ev_kind,
+    // WAIT visibility per EV0–3 (pending or live).
+    input  wire [3:0]  ev_wait,
+    input  wire [3:0]  ev_pending,
+    input  wire        trap_req,
+    input  wire [5:0]  trap_vec,
+    input  wire [3:0]  trap_ev_bit,
+    input  wire        miss_trap_req,
+    input  wire [5:0]  miss_vec,
     input  wire [9:0]  tx_rdata,
     output reg         tx_rd,
     input  wire        rx_full,
@@ -70,7 +76,9 @@ module tick_issue (
     output wire [4:0]  wait_mask_obs,
     output wire [1:0]  wait_tc_obs,
     output wire        pull_block_obs,
-    output wire        mfs_block_obs
+    output wire        mfs_block_obs,
+    output reg         pending_clear_en,
+    output reg  [3:0]  pending_clear_mask
 );
   localparam [7:0] ID_VALUE = 8'h24;
 
@@ -183,65 +191,95 @@ module tick_issue (
     phase_wdata = 8'h0;
     ecfg_we = 1'b0;
     ecfg_wdata = 8'h0;
+    pending_clear_en = 1'b0;
+    pending_clear_mask = 4'h0;
 
     if (run && ctx_enable) begin
-      // WAIT / IN.T completion side-effects (EVF)
-      if (event_wait_done || tick_wait_done) begin
+      // Event traps beat MISS traps (ISS _check_traps before tick/MISS).
+      // ISS sets PC:=vector then issues that insn in the same cycle — fetch_pc
+      // in tick_core redirects imem; here we clear wait state and seed pc_d.
+      if (trap_req) begin
+        pc_d = trap_vec;
+        next_pc = trap_vec + 6'd1;
         waiting_d = 1'b0;
-        evf_d = 5'h0;
-        if (event_wait_done)
-          evf_d = evf_d | {1'b0, (wait_mask_q[3:0] & host_ev_kind)};
-        if (tick_wait_done)
+        pull_block_d = 1'b0;
+        mfs_block_d = 1'b0;
+        evf_d = {1'b0, trap_ev_bit};
+        tcmd_stop = 1'b1;
+        pending_clear_en = 1'b1;
+        pending_clear_mask = trap_ev_bit;
+      end else if (miss_trap_req) begin
+        pc_d = miss_vec;
+        next_pc = miss_vec + 6'd1;
+        waiting_d = 1'b0;
+        pull_block_d = 1'b0;
+        mfs_block_d = 1'b0;
+        // MISS trap clears no latched pending; EVF unchanged for miss.
+        tcmd_stop = 1'b1;
+      end
+      // WAIT / IN.T completion — not when a trap already cleared wait state.
+      if (!trap_req && !miss_trap_req) begin
+        if (event_wait_done || tick_wait_done) begin
+          waiting_d = 1'b0;
+          evf_d = 5'h0;
+          if (event_wait_done || tick_wait_done)
+            evf_d = evf_d | {1'b0, (wait_mask_q[3:0] & ev_wait)};
+          if (tick_wait_done)
+            evf_d = evf_d | 5'h10;
+          pending_clear_en = 1'b1;
+          pending_clear_mask = wait_mask_q[3:0] & ev_wait;
+        end
+
+        if (in_t_done) begin
+          c_d = in_t_bit;
+          z_d = ~in_t_bit;
+          waiting_d = 1'b0;
           evf_d = evf_d | 5'h10;
-      end
+        end
 
-      if (in_t_done) begin
-        c_d = in_t_bit;
-        z_d = ~in_t_bit;
-        waiting_d = 1'b0;
-        evf_d = evf_d | 5'h10; // OR into any same-cycle wait EVF update
-      end
-
-      if (waiting_d) begin
-        if (pull_block_q && !tx_empty) begin
-          tmp = tx_rdata[7:0];
-          rf_d[pull_rd_q] = tmp;
-          last_f_d = tx_rdata[8];
-          cmd_f_d = tx_rdata[9];
-          z_d = (tmp == 8'h0);
-          tx_rd = 1'b1;
-          pull_block_d = 1'b0;
-          waiting_d = 1'b0;
-        end else if (mfs_block_q && res_valid) begin
-          rf_d[mfs_rd_q] = result[7:0];
-          c_d = result[8];
-          z_d = (result[7:0] == 8'h0);
-          res_take = 1'b1;
-          mfs_block_d = 1'b0;
-          waiting_d = 1'b0;
-        end else if (!mfs_block_q && !pull_block_q) begin
-          // Soft event WAIT only — never wake MFS RX / PULL blocks (ISS
-          // _service_waits returns early while mfs_rx / pull_block is set).
-          take = 1'b0;
-          if (!tx_empty && |(wait_mask_q[3:0] & host_ev_kind)) take = 1'b1;
-          if (wait_mask_q != 5'h0 && take && at_a_kind != 2'd3 && at_p_kind != 2'd3) begin
+        if (waiting_d) begin
+          if (pull_block_q && !tx_empty) begin
+            tmp = tx_rdata[7:0];
+            rf_d[pull_rd_q] = tmp;
+            last_f_d = tx_rdata[8];
+            cmd_f_d = tx_rdata[9];
+            z_d = (tmp == 8'h0);
+            tx_rd = 1'b1;
+            pull_block_d = 1'b0;
             waiting_d = 1'b0;
-            evf_d = {1'b0, (wait_mask_q[3:0] & host_ev_kind)};
-            if (wait_tc_q == 2'b01)
-              tcmd_rearm = 1'b1;
-            else if (wait_tc_q == 2'b10 || wait_tc_q == 2'b11)
-              tcmd_stop = 1'b1;
+          end else if (mfs_block_q && res_valid) begin
+            rf_d[mfs_rd_q] = result[7:0];
+            c_d = result[8];
+            z_d = (result[7:0] == 8'h0);
+            res_take = 1'b1;
+            mfs_block_d = 1'b0;
+            waiting_d = 1'b0;
+          end else if (!mfs_block_q && !pull_block_q) begin
+            take = 1'b0;
+            if (|(wait_mask_q[3:0] & ev_wait)) take = 1'b1;
+            if (wait_mask_q != 5'h0 && take && at_a_kind != 2'd3 && at_p_kind != 2'd3) begin
+              waiting_d = 1'b0;
+              evf_d = {1'b0, (wait_mask_q[3:0] & ev_wait)};
+              pending_clear_en = 1'b1;
+              pending_clear_mask = wait_mask_q[3:0] & ev_wait;
+              if (wait_tc_q == 2'b01)
+                tcmd_rearm = 1'b1;
+              else if (wait_tc_q == 2'b10 || wait_tc_q == 2'b11)
+                tcmd_stop = 1'b1;
+            end
           end
         end
       end
 
+      // Issue: after trap, waiting is clear and imem fetch_pc = vector.
       if (!waiting_d) begin
         case (op)
           4'b0000: begin // SET
             if (instr[11]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                if (!timer_run)
+                // Trap same cycle already requested stop; timer_run still 1.
+                if (!timer_run || trap_req || miss_trap_req)
                   tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd1;
@@ -262,7 +300,7 @@ module tick_issue (
             if (instr[11]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                if (!timer_run)
+                if (!timer_run || trap_req || miss_trap_req)
                   tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd2;
@@ -286,7 +324,7 @@ module tick_issue (
             if (instr[9]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                if (!timer_run)
+                if (!timer_run || trap_req || miss_trap_req)
                   tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd3;
@@ -391,7 +429,7 @@ module tick_issue (
           4'b0110: begin // XFER
             if (at_slots_full) stalled = 1'b1;
             else begin
-              if (!timer_run)
+              if (!timer_run || trap_req || miss_trap_req)
                 tcmd_start = 1'b1;
               post_en = 1'b1;
               post_kind = 2'd2;
@@ -501,9 +539,10 @@ module tick_issue (
                 z_d = 1'b0;
                 issued = 1'b1;
               end
-              4'd14: begin // EVCLR stub: read 0 until Stage 2c
-                rf_d[instr[11:10]] = 8'h00;
-                z_d = 1'b1;
+              4'd14: begin // EVCLR: read latched pending flags
+                spr_val = {4'b0, ev_pending};
+                rf_d[instr[11:10]] = spr_val;
+                z_d = (spr_val == 8'h0);
                 issued = 1'b1;
               end
               default: issued = 1'b1;
@@ -526,7 +565,10 @@ module tick_issue (
                 ecfg_wdata = rf_q[instr[11:10]];
               end
               4'd12: next_pc = rf_q[instr[11:10]][5:0];
-              4'd14: ; // EVCLR stub: writes ignored until Stage 2c
+              4'd14: begin // EVCLR: write-1 clear pending
+                pending_clear_en = 1'b1;
+                pending_clear_mask = rf_q[instr[11:10]][3:0];
+              end
               default: ;
             endcase
             issued = 1'b1;

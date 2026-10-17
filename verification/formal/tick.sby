@@ -13,6 +13,7 @@ read -sv host_fifo.sv
 read -sv tick_imem.sv
 read -sv tick_cfg.sv
 read -sv tick_timer.sv
+read -sv tick_events.sv
 read -sv tick_queue.sv
 read -sv tick_issue.sv
 read -sv tick_core.sv
@@ -24,6 +25,7 @@ prep -top tick_formal_top
 ../../src/tick_imem.sv
 ../../src/tick_cfg.sv
 ../../src/tick_timer.sv
+../../src/tick_events.sv
 ../../src/tick_queue.sv
 ../../src/tick_issue.sv
 ../../src/tick_core.sv

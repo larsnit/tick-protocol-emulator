@@ -22,9 +22,13 @@ module tick_queue (
     input  wire [3:0]  pinidle,
     input  wire [1:0]  dout_lp,
     input  wire [1:0]  din_lp,
-    input  wire        host_data,
-    // Bit i set when EVi kind is HOST_DATA (Stage 2b soft host-event waits).
-    input  wire [3:0]  host_ev_kind,
+    input  wire [1:0]  clk_lp,
+    input  wire [1:0]  miss_pol,
+    input  wire [7:0]  default_byte,
+    input  wire        cfg_msb_first,
+    // WAIT visibility (LATCHED pending or live pulse/level) per EV0–3.
+    input  wire [3:0]  ev_wait,
+    input  wire        trap_cancel,
     input  wire        waiting,
     input  wire [4:0]  wait_mask,
     input  wire [1:0]  wait_tc,
@@ -71,7 +75,10 @@ module tick_queue (
     output reg         err_overrun_set,
     output reg         err_arb_set,
     output wire        in_t_done,
-    output wire        in_t_bit
+    output wire        in_t_bit,
+    // MISS trap request (policy=TRAP); issue takes vector from miss_vec.
+    output wire        miss_trap_req,
+    output wire        stretching_obs
 );
   localparam [1:0] PM_IN = 2'b00;
   localparam [1:0] PM_PP = 2'b01;
@@ -89,6 +96,8 @@ module tick_queue (
   reg [7:0]  a_data_q, p_data_q;
   reg [15:0] a_res_q;
   reg [3:0]  drv_val_q, drv_oe_q;
+  reg        stretching_q;
+  reg        miss_trap_pulse;
 
   reg [1:0]  at_a_k, at_p_k;
   reg        at_a_oe, at_p_oe, at_a_msb, at_p_msb, at_a_in_t, at_p_in_t;
@@ -103,12 +112,14 @@ module tick_queue (
   reg        at_res_valid;
   reg [15:0] at_result;
   reg [3:0]  at_drv_val, at_drv_oe;
+  reg        at_stretching;
   reg        at_in_t_done, at_in_t_bit;
   reg [3:0]  rem, sh;
   reg        outb;
   reg [1:0]  sample_lp;
   reg [1:0]  mode_a;
   reg        bit_a;
+  reg [1:0]  clk_i;
 
   reg [1:0]  a_kind_d, p_kind_d;
   reg        a_oe_d, p_oe_d, a_msb_d, p_msb_d, a_in_t_d, p_in_t_d;
@@ -118,7 +129,10 @@ module tick_queue (
   reg [7:0]  a_data_d, p_data_d;
   reg [15:0] a_res_d;
   reg        miss_d, res_valid_d;
+  reg        stretching_d;
   assign miss_comb = at_miss;
+  assign miss_trap_req = miss_trap_pulse;
+  assign stretching_obs = stretching_q;
   reg [15:0] result_d;
   reg [3:0]  drv_val_d, drv_oe_d;
 
@@ -141,8 +155,10 @@ module tick_queue (
   assign in_t_done       = at_in_t_done;
   assign in_t_bit        = at_in_t_bit;
   assign uio_out_comb    = map_out;
-  assign uio_oe_comb     = run ? map_oe : 8'h00;
-  wire _unused_q = &{wait_mask[4:1], sh[3], 1'b0};
+  // Ungated: top forces pad OE=0 while !run (load bus). pin_raw must still see
+  // idle map_oe so sync settles before run (avoids false EDGE_* on run rise).
+  assign uio_oe_comb     = map_oe;
+  wire _unused_q = &{sh[3], 1'b0};
 
   function automatic [1:0] pm_of(input [1:0] li);
     case (li)
@@ -183,6 +199,7 @@ module tick_queue (
     at_result = result;
     at_drv_val = drv_val_q;
     at_drv_oe = drv_oe_q;
+    at_stretching = stretching_q;
     at_in_t_done = 1'b0;
     at_in_t_bit = 1'b0;
     rem = 4'd0;
@@ -191,12 +208,17 @@ module tick_queue (
     sample_lp = 2'd0;
     mode_a = 2'd0;
     bit_a = 1'b0;
+    clk_i = clk_lp;
     overrun_pulse = 1'b0;
     arb_pulse = 1'b0;
+    miss_trap_pulse = 1'b0;
 
     if (!run) begin
       at_drv_val = pinidle;
       at_drv_oe = 4'h0;
+      at_stretching = 1'b0;
+      // !run: OD idle-high starts with drv_val=0 (ISS Context default) so a
+      // pre-trap SET.E still drives; trap/MISS paths below keep pinidle.
       if (pm0 == PM_PP) at_drv_oe[0] = 1'b1;
       else if (pm0 == PM_OD) begin at_drv_oe[0] = ~pinidle[0]; at_drv_val[0] = 1'b0; end
       if (pm1 == PM_PP) at_drv_oe[1] = 1'b1;
@@ -205,10 +227,31 @@ module tick_queue (
       else if (pm2 == PM_OD) begin at_drv_oe[2] = ~pinidle[2]; at_drv_val[2] = 1'b0; end
       if (pm3 == PM_PP) at_drv_oe[3] = 1'b1;
       else if (pm3 == PM_OD) begin at_drv_oe[3] = ~pinidle[3]; at_drv_val[3] = 1'b0; end
+    end else if (trap_cancel) begin
+      // Trap: cancel both slots, drive pins to idle (ISS _do_trap).
+      // Keep OD drv_val=pinidle (do not force 0) so post-trap SET.E on
+      // idle-high OD stays released (fuzz trial25).
+      at_a_k = 2'd0;
+      at_p_k = 2'd0;
+      at_stretching = 1'b0;
+      at_tcmd_stop = 1'b1;
+      at_drv_val = pinidle;
+      at_drv_oe = 4'h0;
+      if (pm0 == PM_PP) at_drv_oe[0] = 1'b1;
+      else if (pm0 == PM_OD) at_drv_oe[0] = ~pinidle[0];
+      if (pm1 == PM_PP) at_drv_oe[1] = 1'b1;
+      else if (pm1 == PM_OD) at_drv_oe[1] = ~pinidle[1];
+      if (pm2 == PM_PP) at_drv_oe[2] = 1'b1;
+      else if (pm2 == PM_OD) at_drv_oe[2] = ~pinidle[2];
+      if (pm3 == PM_PP) at_drv_oe[3] = 1'b1;
+      else if (pm3 == PM_OD) at_drv_oe[3] = ~pinidle[3];
     end else begin
+      // Event-first timed WAIT dequeue. Skip when this cycle also ticks and
+      // the mask includes TICK — tick path ORs both EVF bits (docs 6a).
       if (waiting && !pull_block && !mfs_block &&
           (at_a_k == 2'd3 || at_p_k == 2'd3) &&
-          host_data && |(wait_mask[3:0] & host_ev_kind)) begin
+          |(wait_mask[3:0] & ev_wait) &&
+          !(tick && wait_mask[4])) begin
         if (at_a_k == 2'd3) begin
           at_a_k = at_p_k;
           at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
@@ -228,9 +271,66 @@ module tick_queue (
 
       if (tick) begin
         if (at_a_k == 2'd0) begin
-          if (timer_run)
+          if (timer_run) begin
             at_miss = 1'b1;
+            // MISS policies (FLAG leaves sticky bit only).
+            if (miss_pol == 2'd1) begin
+              // trap: cancel queue, idle pins; issue redirects PC (no pending clear).
+              miss_trap_pulse = 1'b1;
+              at_a_k = 2'd0;
+              at_p_k = 2'd0;
+              at_stretching = 1'b0;
+              at_tcmd_stop = 1'b1;
+              at_drv_val = pinidle;
+              at_drv_oe = 4'h0;
+              if (pm0 == PM_PP) at_drv_oe[0] = 1'b1;
+              else if (pm0 == PM_OD) at_drv_oe[0] = ~pinidle[0];
+              if (pm1 == PM_PP) at_drv_oe[1] = 1'b1;
+              else if (pm1 == PM_OD) at_drv_oe[1] = ~pinidle[1];
+              if (pm2 == PM_PP) at_drv_oe[2] = 1'b1;
+              else if (pm2 == PM_OD) at_drv_oe[2] = ~pinidle[2];
+              if (pm3 == PM_PP) at_drv_oe[3] = 1'b1;
+              else if (pm3 == PM_OD) at_drv_oe[3] = ~pinidle[3];
+            end else if (miss_pol == 2'd2) begin
+              // send-default: inject OUT-8 default and consume this tick as bit 0
+              at_a_k = 2'd2;
+              at_a_mode = 2'd0; // OUT
+              at_a_nm1 = 4'd7;
+              at_a_data = default_byte;
+              at_a_msb = cfg_msb_first;
+              at_a_res = 16'h0;
+              at_a_in_t = 1'b0;
+              rem = 4'd8;
+              sh = cfg_msb_first ? 4'd7 : 4'd0;
+              outb = default_byte[sh[2:0]];
+              mode_a = pm_of(dout_lp);
+              if (mode_a == PM_OD) begin
+                if (outb == 1'b0) begin
+                  at_drv_val[dout_lp] = 1'b0;
+                  at_drv_oe[dout_lp]  = 1'b1;
+                end else begin
+                  at_drv_oe[dout_lp] = 1'b0;
+                end
+              end else if (mode_a != PM_IN) begin
+                at_drv_val[dout_lp] = outb;
+                at_drv_oe[dout_lp]  = 1'b1;
+              end
+              at_a_done = 4'd1;
+            end else if (miss_pol == 2'd3) begin
+              // stretch: hold only CLK_LP low if open-drain
+              at_stretching = 1'b1;
+              if (pm_of(clk_i) == PM_OD) begin
+                at_drv_val[clk_i] = 1'b0;
+                at_drv_oe[clk_i]  = 1'b1;
+              end
+            end
+          end
         end else if (at_a_k == 2'd1) begin
+          if (at_stretching) begin
+            at_stretching = 1'b0;
+            if (pm_of(clk_i) == PM_OD)
+              at_drv_oe[clk_i] = 1'b0;
+          end
           for (int i = 0; i < 4; i = i + 1) begin
             if (at_a_mask[i]) begin
               mode_a = pm_of(i[1:0]);
@@ -258,6 +358,12 @@ module tick_queue (
           at_a_done = 4'd0; at_a_res = 16'h0;
           at_p_k = 2'd0;
         end else if (at_a_k == 2'd2) begin
+          // Release stretch on first bit of a real job (ISS _engine_bit).
+          if (at_stretching) begin
+            at_stretching = 1'b0;
+            if (pm_of(clk_i) == PM_OD)
+              at_drv_oe[clk_i] = 1'b0;
+          end
           if (at_a_in_t) begin
             at_in_t_done = 1'b1;
             at_in_t_bit  = lp_in[at_a_lp];
@@ -312,6 +418,12 @@ module tick_queue (
             end
           end
         end else if (at_a_k == 2'd3) begin
+          // Timed WAIT consume ends stretch (ISS _end_stretch).
+          if (at_stretching) begin
+            at_stretching = 1'b0;
+            if (pm_of(clk_i) == PM_OD)
+              at_drv_oe[clk_i] = 1'b0;
+          end
           at_tick_done = 1'b1;
           if (wait_tc == 2'b01)
             at_tcmd_rearm = 1'b1;
@@ -345,6 +457,7 @@ module tick_queue (
     result_d = at_result;
     drv_val_d = at_drv_val;
     drv_oe_d = at_drv_oe;
+    stretching_d = at_stretching;
 
     if (miss_clear)
       miss_d = 1'b0;
@@ -400,7 +513,11 @@ module tick_queue (
       end
     end
 
-    // Map LPs → physical uio (lower LP index wins; second driver → MAP err)
+    // Map LPs → physical uio (lower LP index wins; second driver → MAP err).
+    // Always map, including while !run: the top gates pad OE when !run so the
+    // load bus still owns uio, but the core OE feeds pin_raw/own_d. If we left
+    // map_oe=0 during load, sync sampled uio load traffic and produced false
+    // EDGE_* pending when run rose (ISS keeps idle drives visible to sync).
     map_out = 8'h00;
     map_oe  = 8'h00;
     map_err = 1'b0;
@@ -410,29 +527,27 @@ module tick_queue (
     oe_i = 1'b0;
     driving = 1'b0;
     phys_i = 3'd0;
-    if (run) begin
-      for (int i = 0; i < 4; i = i + 1) begin
-        mode_i = pm_of(i[1:0]);
-        bit_i  = drv_val_d[i];
-        oe_i   = drv_oe_d[i];
-        phys_i = map_of(i[1:0]);
-        driving = 1'b0;
-        if (mode_i == PM_OD) begin
-          if (bit_i == 1'b0 && oe_i) begin
-            driving = 1'b1;
-            bit_i = 1'b0;
-          end
-        end else if (mode_i == PM_PP) begin
-          if (oe_i) driving = 1'b1;
+    for (int i = 0; i < 4; i = i + 1) begin
+      mode_i = pm_of(i[1:0]);
+      bit_i  = drv_val_d[i];
+      oe_i   = drv_oe_d[i];
+      phys_i = map_of(i[1:0]);
+      driving = 1'b0;
+      if (mode_i == PM_OD) begin
+        if (bit_i == 1'b0 && oe_i) begin
+          driving = 1'b1;
+          bit_i = 1'b0;
         end
-        if (driving) begin
-          if (seen_phys[phys_i])
-            map_err = 1'b1;
-          else begin
-            seen_phys[phys_i] = 1'b1;
-            map_out[phys_i] = bit_i;
-            map_oe[phys_i]  = 1'b1;
-          end
+      end else if (mode_i == PM_PP) begin
+        if (oe_i) driving = 1'b1;
+      end
+      if (driving) begin
+        if (seen_phys[phys_i])
+          map_err = 1'b1;
+        else begin
+          seen_phys[phys_i] = 1'b1;
+          map_out[phys_i] = bit_i;
+          map_oe[phys_i]  = 1'b1;
         end
       end
     end
@@ -455,6 +570,7 @@ module tick_queue (
       res_valid <= 1'b0; result <= 16'h0;
       drv_val_q <= 4'hF;
       drv_oe_q <= 4'h0;
+      stretching_q <= 1'b0;
       uio_out <= 8'h00;
       uio_oe <= 8'h00;
       err_map_set <= 1'b0;
@@ -476,8 +592,9 @@ module tick_queue (
       res_valid <= res_valid_d; result <= result_d;
       drv_val_q <= drv_val_d;
       drv_oe_q <= drv_oe_d;
+      stretching_q <= stretching_d;
       uio_out <= map_out;
-      uio_oe  <= run ? map_oe : 8'h00;
+      uio_oe  <= map_oe;
       err_map_set <= map_err;
       err_overrun_set <= overrun_pulse;
       err_arb_set <= arb_pulse;

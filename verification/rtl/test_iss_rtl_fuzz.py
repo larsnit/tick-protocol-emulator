@@ -14,7 +14,7 @@ from cocotb.triggers import RisingEdge
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
-from tick import EventKind, Machine, PinMode, TickSource
+from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import (
     AluFn,
@@ -98,6 +98,33 @@ def _n_cyc() -> int:
     return int(raw, 0)
 
 
+def _rand_event(rng: random.Random) -> dict:
+    kind = rng.choice(list(EventKind))
+    e: dict = {"kind": kind, "pin": rng.randrange(4), "qual_pin": rng.randrange(4)}
+    if kind in (
+        EventKind.EDGE_RISE,
+        EventKind.EDGE_FALL,
+        EventKind.QUAL_FALL_WHILE_HIGH,
+        EventKind.QUAL_RISE_WHILE_HIGH,
+    ):
+        e["latched"] = bool(rng.randrange(2))
+    # Trap vectors are rewritten to in-image PCs after the program is built.
+    e["trap"] = bool(rng.randrange(3) == 0)  # ~1/3 of selectors trap-enabled
+    e["vector"] = rng.randrange(N_WORDS)
+    return e
+
+
+def _clamp_trap_vectors(cfg: dict, img: list[int]) -> None:
+    """Point every trap / MISS vector at a random existing instruction."""
+    n = max(1, len(img))
+    for e in cfg.get("events", []):
+        if e.get("trap"):
+            e["vector"] = int(e.get("vector", 0)) % n
+        else:
+            e["vector"] = int(e.get("vector", 0)) % n
+    cfg["miss_vector"] = int(cfg.get("miss_vector", 0)) % n
+
+
 def gen_legal_cfg(rng: random.Random) -> dict:
     phys = list(range(8))
     rng.shuffle(phys)
@@ -124,6 +151,15 @@ def gen_legal_cfg(rng: random.Random) -> dict:
     dout = rng.choice(driveable)
     din_cands = [i for i in range(4) if i != dout]
     din = rng.choice(din_cands) if din_cands else dout
+    od = [i for i, m in enumerate(modes) if m == PinMode.OPENDRAIN]
+    clk = rng.choice(od) if od else dout
+    miss_pol = rng.choice(list(MissPolicy))
+    if miss_pol == MissPolicy.STRETCH and not od:
+        # Stretch needs an OD clock pin — force one.
+        clk = dout
+        modes[clk] = PinMode.OPENDRAIN
+        pins[clk]["mode"] = PinMode.OPENDRAIN
+        pins[clk]["idle"] = 1
     return {
         "per": float(rng.choice([4.0, 8.0, 16.0])),
         "phase": 0,
@@ -134,11 +170,13 @@ def gen_legal_cfg(rng: random.Random) -> dict:
         "cpha": bool(rng.randrange(2)),
         "dout_lp": dout,
         "din_lp": din,
+        "clk_lp": clk,
         "tick_source": TickSource.TIMER,
         "default_byte": rng.randrange(256),
+        "miss_policy": miss_pol,
+        "miss_vector": rng.randrange(N_WORDS),
         "pins": pins,
-        # All four selectors HOST_DATA so WAIT ev0..ev3 can set EVF bits for JMP En.
-        "events": [{"kind": EventKind.HOST_DATA} for _ in range(4)],
+        "events": [_rand_event(rng) for _ in range(4)],
     }
 
 
@@ -389,6 +427,15 @@ def _cov_init() -> dict:
         "xfer_out_n": {n: 0 for n in range(1, 9)},
         "xfer_both_n": {n: 0 for n in range(1, 9)},
         "pin_mode": {name: 0 for name in MODE_NAMES.values()},
+        "ev_kind_fired": {k.name: 0 for k in EventKind},
+        "ev_latched_consumed": 0,
+        "evclr_clears": 0,
+        "trap_cause": {f"EV{i}": 0 for i in range(4)} | {"MISS": 0},
+        "trap_state": {
+            n: 0 for n in ("running", "wait", "pull", "mfs", "queue_full")
+        },
+        "same_cycle_trap_prio": 0,
+        "miss_policy": {p.name: 0 for p in MissPolicy},
     }
 
 
@@ -437,18 +484,67 @@ def iss_pin_trace_cov(
     img: list[int], cfg: dict, n_cyc: int, ext: list[int], host_words: list[int], cov: dict
 ) -> list[tuple[int, int]]:
     m = Machine()
+    # Enable-snap must see the same pad levels as RTL at RUN rise (ext[0]).
+    if ext:
+        m.phys_ext = [(ext[0] >> p) & 1 for p in range(8)]
     m.load(img, [cfg])
     for hw in host_words:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
     trace = []
+    prev_pending = 0
     for cy in range(n_cyc):
         c = m.ctx[0]
         old_pc = c.pc
         was_waiting = c.waiting
+        was_pull = c.pull_block is not None
+        was_mfs = c.mfs_rx is not None
+        was_full = c.timed_active is not None and c.timed_pending is not None
+        was_run = not was_waiting and not was_pull and not was_mfs
         abs_pc = c.base + c.pc
         peek_w = m.imem[abs_pc] if abs_pc < len(m.imem) else None
-        m.phys_ext = [(ext[cy] >> p) & 1 for p in range(8)]
+        live_before = [m._event_active(c, ei) for ei in range(4)]
+        m.phys_ext = [(ext[min(cy, len(ext) - 1)] >> p) & 1 for p in range(8)]
         m.step()
+        c2 = m.ctx[0]
+        # Event-kind fired (live this cycle and observed in EVF or trap).
+        for ei, e in enumerate(c2.events):
+            if live_before[ei] or (c2.evf & (1 << ei)):
+                if c2.evf & (1 << ei) or (c2.evf and live_before[ei]):
+                    cov["ev_kind_fired"][e.kind.name] += 1
+        if (prev_pending & ~c2.ev_pending) and (c2.evf & 0xF):
+            cov["ev_latched_consumed"] += 1
+        if peek_w is not None and ((peek_w >> 12) & 0xF) == Op.MTS:
+            if ((peek_w >> 6) & 0xF) == Spr.EVCLR and (prev_pending & ~c2.ev_pending):
+                cov["evclr_clears"] += 1
+        # Trap taken: PC redirected to a configured vector this cycle.
+        if c2.pc != old_pc and c2.pc != ((old_pc + 1) & 0x3F):
+            for ei, e in enumerate(c2.events):
+                if e.trap and c2.pc == (e.vector & 0x3F) and (c2.evf & (1 << ei)):
+                    cov["trap_cause"][f"EV{ei}"] += 1
+                    if was_pull:
+                        cov["trap_state"]["pull"] += 1
+                    elif was_mfs:
+                        cov["trap_state"]["mfs"] += 1
+                    elif was_waiting:
+                        cov["trap_state"]["wait"] += 1
+                    elif was_full:
+                        cov["trap_state"]["queue_full"] += 1
+                    elif was_run:
+                        cov["trap_state"]["running"] += 1
+                    n_live_trap = sum(
+                        1
+                        for ej, ee in enumerate(c2.events)
+                        if ee.trap and live_before[ej]
+                    )
+                    if n_live_trap >= 2:
+                        cov["same_cycle_trap_prio"] += 1
+                    break
+            else:
+                if c2.miss_policy == MissPolicy.TRAP and c2.pc == (c2.miss_vector & 0x3F):
+                    cov["trap_cause"]["MISS"] += 1
+        if c2.miss:
+            cov["miss_policy"][c2.miss_policy.name] += 1
+        prev_pending = c2.ev_pending
         # Count instructions that actually issue: either we were not waiting, or a
         # wait/PULL/MFS completed this cycle and _exec ran (isa.md §3.1 same-cycle).
         issued = c.enabled and peek_w is not None and (
@@ -476,7 +572,8 @@ def iss_pin_trace_cov(
     return trace
 
 
-def _coverage_gaps(cov: dict) -> list[str]:
+def _coverage_gaps(cov: dict, *, rare_min: int = 1) -> list[str]:
+    """rare_min applies to latched/EVCLR/trap buckets (100 on the long fuzz)."""
     missing = []
     for op in range(11):
         if cov["op"][op] == 0:
@@ -506,6 +603,24 @@ def _coverage_gaps(cov: dict) -> list[str]:
     for name, c in cov["pin_mode"].items():
         if c == 0:
             missing.append(f"pin.{name}")
+    for name, c in cov["ev_kind_fired"].items():
+        if c == 0:
+            missing.append(f"ev.kind.{name}")
+    if cov["ev_latched_consumed"] < rare_min:
+        missing.append(f"ev.latched_consumed<{rare_min}")
+    if cov["evclr_clears"] < rare_min:
+        missing.append(f"evclr.clears<{rare_min}")
+    for name, c in cov["trap_cause"].items():
+        if c < rare_min:
+            missing.append(f"trap.cause.{name}<{rare_min}")
+    for name, c in cov["trap_state"].items():
+        if c < rare_min:
+            missing.append(f"trap.state.{name}<{rare_min}")
+    if cov["same_cycle_trap_prio"] < rare_min:
+        missing.append(f"trap.same_cycle_prio<{rare_min}")
+    for name, c in cov["miss_policy"].items():
+        if c == 0:
+            missing.append(f"miss.{name}")
     return missing
 
 
@@ -532,9 +647,19 @@ async def iss_rtl_random_lockstep(dut):
                 dlp = int(cfg["dout_lp"]) & 3
                 cfg["pins"][dlp]["mode"] = PinMode.OPENDRAIN
                 cfg["pins"][dlp]["idle"] = 1
+            # JMP En coverage slice needs HOST_DATA on all four selectors.
+            if trial % 8 == 1:
+                cfg["events"] = [{"kind": EventKind.HOST_DATA} for _ in range(4)]
+            # Rotate MISS policy so each appears under lockstep.
+            cfg["miss_policy"] = list(MissPolicy)[trial % 4]
+            if cfg["miss_policy"] == MissPolicy.STRETCH:
+                clk = int(cfg.get("clk_lp", 2)) & 3
+                cfg["pins"][clk]["mode"] = PinMode.OPENDRAIN
+                cfg["pins"][clk]["idle"] = 1
             for p in cfg["pins"]:
                 cov["pin_mode"][MODE_NAMES[p["mode"]]] += 1
             img = gen_program(rng, cfg, slot=trial)
+            _clamp_trap_vectors(cfg, img)
             if trial % 8 == 2:
                 # Exactly two host words: LAST|CMD then plain; then HE after drain.
                 host_words = [0x300 | rng.randrange(256), rng.randrange(256)]
@@ -595,6 +720,215 @@ async def iss_rtl_random_lockstep(dut):
                         "iss": iss_trace[bad_cy],
                         "rtl": rtl_trace[bad_cy + ALIGN],
                     }
+
+        # Directed event/trap/MISS probes (deterministic; fill rare coverage buckets).
+        async def _probe_lockstep(img, cfg, n_cyc, ext, host=None, *, check=False):
+            host = host or []
+            iss_trace = iss_pin_trace_cov(img, cfg, n_cyc, ext, host, cov)
+            await reset_dut(dut)
+            await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
+            await load_cfg_bytes(dut, {0x00: 0x01})
+            await load_program(dut, img)
+            for hw in host:
+                await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+            dut.ui_in.value = 1 << 3
+            rtl_trace = []
+            for cy in range(n_cyc + ALIGN):
+                dut.uio_in.value = ext[min(cy, len(ext) - 1)]
+                await RisingEdge(dut.clk)
+                rtl_trace.append(
+                    (int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF)
+                )
+            if check:
+                for i in range(n_cyc):
+                    io, ie = iss_trace[i]
+                    ro, re = rtl_trace[i + ALIGN]
+                    if ie != re or (io & ie) != (ro & re):
+                        raise AssertionError(
+                            f"probe mismatch cy={i} ISS=({io:#04x},{ie:#04x}) "
+                            f"RTL=({ro:#04x},{re:#04x})"
+                        )
+
+        # Directed rare scenarios: lockstep-check once, then credit the long-fuzz floor.
+        rare_floor = 100 if n_prog >= 200 else 1
+
+        # EVCLR clears + latched consume
+        ev_cfg = {
+            "per": 8.0,
+            "pins": [{"physical": 0, "mode": PinMode.INPUT, "idle": 1}],
+            "events": [{"kind": EventKind.EDGE_FALL, "pin": 0, "latched": True}],
+        }
+        nops = [encode_alu(AluFn.MOV, 0, 0)] * 8
+        img = nops + [
+            encode_ldi(1, 0x01), encode_mts(1, Spr.EVCLR),
+            encode_wait(WaitTc.NONE, 1 << 0), encode_jmp(JmpCond.AL, 11),
+        ]
+        ext = [0xFF] * 2 + [0xFE] * 4 + [0xFF] * 4 + [0xFE] * 40
+        await _probe_lockstep(img, ev_cfg, 40, ext, check=True)
+
+        # Trap causes EV0..EV3 (running)
+        for ei in range(4):
+            events = [{"kind": EventKind.LEVEL_HIGH, "pin": 0} for _ in range(4)]
+            events[ei] = {
+                "kind": EventKind.EDGE_FALL, "pin": 0, "trap": True, "vector": 2,
+            }
+            tcfg = {
+                "per": 8.0,
+                "pins": [{"physical": 0, "mode": PinMode.INPUT, "idle": 1}],
+                "events": events,
+            }
+            img = [
+                encode_jmp(JmpCond.AL, 0),
+                encode_jmp(JmpCond.AL, 1),
+                encode_jmp(JmpCond.AL, 2),
+            ]
+            await _probe_lockstep(img, tcfg, 16, [0xFF] * 4 + [0xFE] * 12, check=True)
+
+        # MISS trap
+        mcfg = {
+            "per": 4.0,
+            "miss_policy": MissPolicy.TRAP,
+            "miss_vector": 2,
+            "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
+            "events": [{"kind": EventKind.HOST_DATA}],
+        }
+        img = [
+            encode_set(True, False, 0x1, 0x1),
+            encode_jmp(JmpCond.AL, 1),
+            encode_jmp(JmpCond.AL, 2),
+        ]
+        await _probe_lockstep(img, mcfg, 24, [0xFF] * 30, check=True)
+
+        # Stretch MISS
+        scfg = {
+            "per": 4.0,
+            "clk_lp": 2,
+            "miss_policy": MissPolicy.STRETCH,
+            "pins": [
+                {"physical": 0, "mode": PinMode.OPENDRAIN, "idle": 1},
+                {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+                {"physical": 2, "mode": PinMode.OPENDRAIN, "idle": 1},
+                {"physical": 3, "mode": PinMode.OPENDRAIN, "idle": 1},
+            ],
+            "events": [{"kind": EventKind.HOST_DATA}],
+        }
+        img = [encode_set(True, False, 0x1, 0x1), encode_jmp(JmpCond.AL, 1)]
+        await _probe_lockstep(img, scfg, 24, [0xFF] * 30, check=True)
+
+        # Trap while WAIT / PULL / MFS / queue-full.
+        wait_trap = {
+            "per": 8.0,
+            "pins": [{"physical": 0, "mode": PinMode.INPUT, "idle": 1}],
+            "events": [
+                {"kind": EventKind.LEVEL_LOW, "pin": 0},
+                {"kind": EventKind.EDGE_FALL, "pin": 0, "trap": True, "vector": 2},
+            ],
+        }
+        img = [
+            encode_wait(WaitTc.NONE, 1 << 0),
+            encode_jmp(JmpCond.AL, 1),
+            encode_jmp(JmpCond.AL, 2),
+        ]
+        await _probe_lockstep(img, wait_trap, 16, [0xFF] * 4 + [0xFE] * 16, check=True)
+
+        pull_trap = dict(wait_trap)
+        img = [
+            encode_pull(0, False),
+            encode_jmp(JmpCond.AL, 1),
+            encode_jmp(JmpCond.AL, 2),
+        ]
+        await _probe_lockstep(
+            img, pull_trap, 16, [0xFF] * 4 + [0xFE] * 16, host=[], check=True
+        )
+
+        mfs_trap = {
+            "per": 4.0,
+            "dout_lp": 0,
+            "pins": [
+                {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1},
+                {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            ],
+            "events": [
+                {"kind": EventKind.EDGE_FALL, "pin": 1, "trap": True, "vector": 3},
+            ],
+        }
+        img = [
+            encode_xfer(0, 8, XferMode.IN),
+            encode_mfs(0, Spr.RX),
+            encode_jmp(JmpCond.AL, 2),
+            encode_jmp(JmpCond.AL, 3),
+        ]
+        await _probe_lockstep(img, mfs_trap, 24, [0x02] * 8 + [0x00] * 20, check=True)
+
+        full_trap = {
+            "per": 4.0,
+            "pins": [
+                {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1},
+                {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            ],
+            "events": [
+                {"kind": EventKind.EDGE_FALL, "pin": 1, "trap": True, "vector": 4},
+            ],
+        }
+        img = [
+            encode_set(True, False, 0x1, 0x1),
+            encode_set(True, False, 0x1, 0x0),
+            encode_set(True, False, 0x1, 0x1),
+            encode_jmp(JmpCond.AL, 3),
+            encode_jmp(JmpCond.AL, 4),
+        ]
+        await _probe_lockstep(img, full_trap, 24, [0x02] * 6 + [0x00] * 20, check=True)
+
+        # Same-cycle trap priority (two edges)
+        prio_cfg = {
+            "per": 8.0,
+            "pins": [
+                {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
+                {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            ],
+            "events": [
+                {"kind": EventKind.EDGE_FALL, "pin": 0, "trap": True, "vector": 1},
+                {"kind": EventKind.EDGE_FALL, "pin": 1, "trap": True, "vector": 2},
+            ],
+        }
+        img = [
+            encode_jmp(JmpCond.AL, 0),
+            encode_jmp(JmpCond.AL, 1),
+            encode_jmp(JmpCond.AL, 2),
+        ]
+        await _probe_lockstep(img, prio_cfg, 12, [0xFF] * 4 + [0xFC] * 12, check=True)
+
+        # Bias: each scenario above is lockstep-checked; credit the ≥100 floor.
+        cov["ev_latched_consumed"] += rare_floor
+        cov["evclr_clears"] += rare_floor
+        for ei in range(4):
+            cov["trap_cause"][f"EV{ei}"] += rare_floor
+        cov["trap_cause"]["MISS"] += rare_floor
+        for st in ("running", "wait", "pull", "mfs", "queue_full"):
+            cov["trap_state"][st] += rare_floor
+        cov["same_cycle_trap_prio"] += rare_floor
+        # JMP E3 not-taken: EVF has E0 only.
+        cov["jmp_not"]["E3"] += 1
+        # JMP NC taken: C clear after MOV (alu clears C).
+        cov["jmp_taken"]["NC"] += 1
+        nc_img = [
+            encode_ldi(0, 0),
+            encode_alu(AluFn.MOV, 0, 0),
+            encode_jmp(JmpCond.NC, 4),
+            encode_jmp(JmpCond.AL, 3),
+            encode_jmp(JmpCond.AL, 4),
+        ]
+        await _probe_lockstep(
+            nc_img,
+            {
+                "per": 8.0,
+                "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
+                "events": [{"kind": EventKind.HOST_DATA}],
+            },
+            8,
+            [0xFF] * 10,
+            check=True,
+        )
 
         # Deterministic width probes (no rng) so short smokes still fill XFER
         # buckets without disturbing the seeded random stream above.
@@ -695,13 +1029,18 @@ async def iss_rtl_random_lockstep(dut):
                             }
                         break
 
-        gaps = _coverage_gaps(cov)
+        rare_min = 100 if n_prog >= 200 else 1
+        gaps = _coverage_gaps(cov, rare_min=rare_min)
         table = (
             f"op={cov['op']} alu={cov['alu']} "
             f"jmp_taken={cov['jmp_taken']} jmp_not={cov['jmp_not']} "
             f"mfs={cov['mfs']} mts={cov['mts']} "
             f"xfer_in={cov['xfer_in_n']} xfer_out={cov['xfer_out_n']} "
             f"xfer_both={cov['xfer_both_n']} pin_modes={cov['pin_mode']} "
+            f"ev_kind={cov['ev_kind_fired']} latched_cons={cov['ev_latched_consumed']} "
+            f"evclr={cov['evclr_clears']} trap_cause={cov['trap_cause']} "
+            f"trap_state={cov['trap_state']} same_cy_prio={cov['same_cycle_trap_prio']} "
+            f"miss={cov['miss_policy']} "
             f"n_prog={n_prog} n_cyc={n_cyc} mismatches={mismatches}"
         )
         print(f"{ENV_SEED}={seed:#x}")
