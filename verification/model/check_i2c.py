@@ -102,6 +102,19 @@ def i2c_clock_in_byte_msb(m: Machine) -> int:
     return value
 
 
+def i2c_master_ack(m: Machine) -> None:
+    """9th bit: master holds SDA low (ACK) — more bytes follow."""
+    _set_sda_scl(m, 0, 0)
+    for _ in range(_SCL_PHASE):
+        m.step()
+    _set_sda_scl(m, 0, 1)
+    for _ in range(_SCL_PHASE):
+        m.step()
+    _set_sda_scl(m, 1, 0)
+    for _ in range(_SCL_PHASE):
+        m.step()
+
+
 def i2c_master_nack(m: Machine) -> None:
     """9th bit: master holds SDA high (NACK)."""
     _set_sda_scl(m, 1, 0)

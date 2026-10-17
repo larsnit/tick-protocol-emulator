@@ -26,6 +26,8 @@ module tick_events (
     output wire [3:0]  ev_live,
     output wire [3:0]  ev_wait,
     output wire [3:0]  ev_pending,
+    // Previous-cycle LP sample (same as edge detect); pin-edge ticks share this.
+    output wire [3:0]  lp_prev,
     output wire        trap_req,
     output wire [5:0]  trap_vec,
     output wire [3:0]  trap_ev_bit
@@ -92,6 +94,7 @@ module tick_events (
 
   assign ev_live = live_w;
   assign ev_pending = pending_q;
+  assign lp_prev = lp_prev_q;
 
   // WAIT visibility: LATCHED edges use pending OR this-cycle live edge
   // (ISS _update_ev_pending then _event_for_wait in the same step).

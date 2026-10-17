@@ -10,6 +10,8 @@ module tick_queue (
     input  wire        run,
     input  wire        tick,
     input  wire        timer_run,
+    // 0=timer (controller may drive CLK_LP), 1=pin-edge (target: never drive CLK).
+    input  wire        tick_src,
     input  wire [3:0]  lp_in,
     input  wire [1:0]  pinmode0,
     input  wire [1:0]  pinmode1,
@@ -26,6 +28,9 @@ module tick_queue (
     input  wire [1:0]  miss_pol,
     input  wire [7:0]  default_byte,
     input  wire        cfg_msb_first,
+    input  wire        cfg_clk_en,
+    input  wire        cfg_cpha,
+    input  wire        cfg_cpol,
     // WAIT visibility (LATCHED pending or live pulse/level) per EV0–3.
     input  wire [3:0]  ev_wait,
     input  wire        trap_cancel,
@@ -66,6 +71,10 @@ module tick_queue (
     output wire        miss_comb,
     output reg         res_valid,
     output reg  [15:0] result,
+    // Same-cycle as XFER complete (ISS _on_tick then _service_waits) — must not
+    // be the registered res_valid/result or MFS RX wakes one cycle late.
+    output wire        res_valid_comb,
+    output wire [15:0] result_comb,
     output reg  [7:0]  uio_out,
     output reg  [7:0]  uio_oe,
     // Combinational drive (pre-pad register) for own-sample delay into sync
@@ -95,6 +104,7 @@ module tick_queue (
   reg [3:0]  a_nm1_q, p_nm1_q, a_done_q;
   reg [7:0]  a_data_q, p_data_q;
   reg [15:0] a_res_q;
+  reg        a_half_q;  // engine-clock: 0=leading, 1=trailing
   reg [3:0]  drv_val_q, drv_oe_q;
   reg        stretching_q;
   reg        miss_trap_pulse;
@@ -106,6 +116,7 @@ module tick_queue (
   reg [3:0]  at_a_nm1, at_p_nm1, at_a_done;
   reg [7:0]  at_a_data, at_p_data;
   reg [15:0] at_a_res;
+  reg        at_a_half;
   reg        at_event_done, at_tick_done;
   reg        at_tcmd_stop, at_tcmd_rearm;
   reg        at_miss;
@@ -114,6 +125,7 @@ module tick_queue (
   reg [3:0]  at_drv_val, at_drv_oe;
   reg        at_stretching;
   reg        at_in_t_done, at_in_t_bit;
+  reg        at_cpha0_on_promote;  // pending→active: drive CPHA=0 first DOUT bit
   reg [3:0]  rem, sh;
   reg        outb;
   reg [1:0]  sample_lp;
@@ -128,8 +140,13 @@ module tick_queue (
   reg [3:0]  a_nm1_d, p_nm1_d, a_done_d;
   reg [7:0]  a_data_d, p_data_d;
   reg [15:0] a_res_d;
+  reg        a_half_d;
   reg        miss_d, res_valid_d;
   reg        stretching_d;
+  reg        clk_active, clk_idle;
+  reg        drive_clk;
+  // Comb2-only temp (must not share rem/sh/outb with after-tick comb1).
+  reg        post_outb;
   assign miss_comb = at_miss;
   assign miss_trap_req = miss_trap_pulse;
   assign stretching_obs = stretching_q;
@@ -154,6 +171,8 @@ module tick_queue (
   // Same-cycle as tick (like event_wait_done) — must not be registered.
   assign in_t_done       = at_in_t_done;
   assign in_t_bit        = at_in_t_bit;
+  assign res_valid_comb  = at_res_valid;
+  assign result_comb     = at_result;
   assign uio_out_comb    = map_out;
   // Ungated: top forces pad OE=0 while !run (load bus). pin_raw must still see
   // idle map_oe so sync settles before run (avoids false EDGE_* on run rise).
@@ -190,7 +209,11 @@ module tick_queue (
     at_a_in_t = a_in_t_q; at_p_in_t = p_in_t_q;
     at_a_lp = a_lp_q; at_p_lp = p_lp_q;
     at_a_done = a_done_q; at_a_res = a_res_q;
+    at_a_half = a_half_q;
     at_event_done = 1'b0;
+    clk_active = cfg_cpol ? 1'b0 : 1'b1;
+    clk_idle   = cfg_cpol ? 1'b1 : 1'b0;
+    drive_clk  = cfg_clk_en && !tick_src;
     at_tick_done = 1'b0;
     at_tcmd_stop = 1'b0;
     at_tcmd_rearm = 1'b0;
@@ -202,6 +225,7 @@ module tick_queue (
     at_stretching = stretching_q;
     at_in_t_done = 1'b0;
     at_in_t_bit = 1'b0;
+    at_cpha0_on_promote = 1'b0;
     rem = 4'd0;
     sh = 4'd0;
     outb = 1'b0;
@@ -217,6 +241,7 @@ module tick_queue (
       at_drv_val = pinidle;
       at_drv_oe = 4'h0;
       at_stretching = 1'b0;
+      at_a_half = 1'b0;
       // !run: OD idle-high starts with drv_val=0 (ISS Context default) so a
       // pre-trap SET.E still drives; trap/MISS paths below keep pinidle.
       if (pm0 == PM_PP) at_drv_oe[0] = 1'b1;
@@ -233,6 +258,7 @@ module tick_queue (
       // idle-high OD stays released (fuzz trial25).
       at_a_k = 2'd0;
       at_p_k = 2'd0;
+      at_a_half = 1'b0;
       at_stretching = 1'b0;
       at_tcmd_stop = 1'b1;
       at_drv_val = pinidle;
@@ -259,6 +285,7 @@ module tick_queue (
           at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
           at_a_done = 4'd0; at_a_res = 16'h0;
           at_p_k = 2'd0;
+          at_cpha0_on_promote = 1'b1;
         end else begin
           at_p_k = 2'd0;
         end
@@ -279,6 +306,7 @@ module tick_queue (
               miss_trap_pulse = 1'b1;
               at_a_k = 2'd0;
               at_p_k = 2'd0;
+              at_a_half = 1'b0;
               at_stretching = 1'b0;
               at_tcmd_stop = 1'b1;
               at_drv_val = pinidle;
@@ -292,7 +320,7 @@ module tick_queue (
               if (pm3 == PM_PP) at_drv_oe[3] = 1'b1;
               else if (pm3 == PM_OD) at_drv_oe[3] = ~pinidle[3];
             end else if (miss_pol == 2'd2) begin
-              // send-default: inject OUT-8 default and consume this tick as bit 0
+              // send-default: inject OUT-8 default and run one _engine_bit (ISS).
               at_a_k = 2'd2;
               at_a_mode = 2'd0; // OUT
               at_a_nm1 = 4'd7;
@@ -300,22 +328,47 @@ module tick_queue (
               at_a_msb = cfg_msb_first;
               at_a_res = 16'h0;
               at_a_in_t = 1'b0;
+              at_a_done = 4'd0;
+              at_a_half = 1'b0;
               rem = 4'd8;
               sh = cfg_msb_first ? 4'd7 : 4'd0;
               outb = default_byte[sh[2:0]];
-              mode_a = pm_of(dout_lp);
-              if (mode_a == PM_OD) begin
-                if (outb == 1'b0) begin
-                  at_drv_val[dout_lp] = 1'b0;
-                  at_drv_oe[dout_lp]  = 1'b1;
-                end else begin
-                  at_drv_oe[dout_lp] = 1'b0;
-                end
-              end else if (mode_a != PM_IN) begin
-                at_drv_val[dout_lp] = outb;
-                at_drv_oe[dout_lp]  = 1'b1;
+              if (at_stretching) begin
+                at_stretching = 1'b0;
+                if (pm_of(clk_i) == PM_OD)
+                  at_drv_oe[clk_i] = 1'b0;
               end
-              at_a_done = 4'd1;
+              if (cfg_clk_en) begin
+                // One _engine_bit: leading half only (bits_done stays 0).
+                if (cfg_cpha) begin
+                  mode_a = pm_of(dout_lp);
+                  if (mode_a == PM_OD) begin
+                    if (outb == 1'b0) begin at_drv_val[dout_lp]=1'b0; at_drv_oe[dout_lp]=1'b1; end
+                    else at_drv_oe[dout_lp]=1'b0;
+                  end else if (mode_a != PM_IN) begin
+                    at_drv_val[dout_lp]=outb; at_drv_oe[dout_lp]=1'b1;
+                  end
+                end
+                if (drive_clk) begin
+                  mode_a = pm_of(clk_lp);
+                  if (mode_a == PM_OD) begin
+                    if (clk_active == 1'b0) begin at_drv_val[clk_lp]=1'b0; at_drv_oe[clk_lp]=1'b1; end
+                    else at_drv_oe[clk_lp]=1'b0;
+                  end else if (mode_a != PM_IN) begin
+                    at_drv_val[clk_lp]=clk_active; at_drv_oe[clk_lp]=1'b1;
+                  end
+                end
+                at_a_half = 1'b1;
+              end else begin
+                mode_a = pm_of(dout_lp);
+                if (mode_a == PM_OD) begin
+                  if (outb == 1'b0) begin at_drv_val[dout_lp]=1'b0; at_drv_oe[dout_lp]=1'b1; end
+                  else at_drv_oe[dout_lp]=1'b0;
+                end else if (mode_a != PM_IN) begin
+                  at_drv_val[dout_lp]=outb; at_drv_oe[dout_lp]=1'b1;
+                end
+                at_a_done = 4'd1;
+              end
             end else if (miss_pol == 2'd3) begin
               // stretch: hold only CLK_LP low if open-drain
               at_stretching = 1'b1;
@@ -355,10 +408,11 @@ module tick_queue (
           at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
           at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
           at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
-          at_a_done = 4'd0; at_a_res = 16'h0;
+          at_a_done = 4'd0; at_a_res = 16'h0; at_a_half = 1'b0;
           at_p_k = 2'd0;
+          at_cpha0_on_promote = 1'b1;
         end else if (at_a_k == 2'd2) begin
-          // Release stretch on first bit of a real job (ISS _engine_bit).
+          // Release stretch on first engine step (ISS _engine_bit / IN.T).
           if (at_stretching) begin
             at_stretching = 1'b0;
             if (pm_of(clk_i) == PM_OD)
@@ -371,50 +425,146 @@ module tick_queue (
             at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
             at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
             at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
-            at_a_done = 4'd0; at_a_res = 16'h0;
+            at_a_done = 4'd0; at_a_res = 16'h0; at_a_half = 1'b0;
             at_p_k = 2'd0;
+            at_cpha0_on_promote = 1'b1;
           end else begin
             rem = at_a_nm1 + 4'd1 - at_a_done;
             sh = at_a_msb ? (rem - 4'd1) : at_a_done;
             outb = at_a_data[sh[2:0]];
-            if (at_a_mode == 2'd0 || at_a_mode == 2'd2) begin
-              mode_a = pm_of(dout_lp);
-              if (mode_a == PM_OD) begin
-                if (outb == 1'b0) begin
-                  at_drv_val[dout_lp] = 1'b0;
-                  at_drv_oe[dout_lp]  = 1'b1;
-                end else begin
-                  at_drv_oe[dout_lp] = 1'b0;
-                end
-              end else if (mode_a != PM_IN) begin
-                at_drv_val[dout_lp] = outb;
-                at_drv_oe[dout_lp]  = 1'b1;
-              end
-            end
-            // ISS: pure IN samples dout_lp; BOTH samples din_lp
             sample_lp = (at_a_mode == 2'd1) ? dout_lp : din_lp;
-            if (at_a_mode == 2'd1 || at_a_mode == 2'd2) begin
-              if (at_a_msb) at_a_res = {at_a_res[14:0], lp_in[sample_lp]};
-              else at_a_res[at_a_done] = lp_in[sample_lp];
-            end
-            // ARB: BOTH + OD DOUT, drive-1 (release) but sync readback is 0
-            if (at_a_mode == 2'd2 && pm_of(dout_lp) == PM_OD &&
-                outb == 1'b1 && lp_in[dout_lp] == 1'b0)
-              arb_pulse = 1'b1;
-            if (at_a_done == at_a_nm1) begin
-              if (at_res_valid)
-                overrun_pulse = 1'b1;
-              if (at_a_mode == 2'd0) at_result = {8'h0, at_a_data};
-              else at_result = at_a_res;
-              at_res_valid = 1'b1;
-              at_a_k = at_p_k;
-              at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
-              at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
-              at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
-              at_a_done = 4'd0; at_a_res = 16'h0;
-              at_p_k = 2'd0;
+            if (cfg_clk_en) begin
+              // ---- Engine clock: two ticks per bit (ISS _engine_bit) ----
+              if (at_a_half == 1'b0) begin
+                if (cfg_cpha) begin
+                  if (at_a_mode == 2'd0 || at_a_mode == 2'd2) begin
+                    mode_a = pm_of(dout_lp);
+                    if (mode_a == PM_OD) begin
+                      if (outb == 1'b0) begin at_drv_val[dout_lp]=1'b0; at_drv_oe[dout_lp]=1'b1; end
+                      else at_drv_oe[dout_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[dout_lp]=outb; at_drv_oe[dout_lp]=1'b1;
+                    end
+                  end
+                  if (drive_clk) begin
+                    mode_a = pm_of(clk_lp);
+                    if (mode_a == PM_OD) begin
+                      if (clk_active == 1'b0) begin at_drv_val[clk_lp]=1'b0; at_drv_oe[clk_lp]=1'b1; end
+                      else at_drv_oe[clk_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[clk_lp]=clk_active; at_drv_oe[clk_lp]=1'b1;
+                    end
+                  end
+                end else begin
+                  if (at_a_mode == 2'd1 || at_a_mode == 2'd2) begin
+                    if (at_a_msb) at_a_res = {at_a_res[14:0], lp_in[sample_lp]};
+                    else at_a_res[at_a_done] = lp_in[sample_lp];
+                  end
+                  if (drive_clk) begin
+                    mode_a = pm_of(clk_lp);
+                    if (mode_a == PM_OD) begin
+                      if (clk_active == 1'b0) begin at_drv_val[clk_lp]=1'b0; at_drv_oe[clk_lp]=1'b1; end
+                      else at_drv_oe[clk_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[clk_lp]=clk_active; at_drv_oe[clk_lp]=1'b1;
+                    end
+                  end
+                end
+                at_a_half = 1'b1;
+              end else begin
+                if (cfg_cpha) begin
+                  if (at_a_mode == 2'd1 || at_a_mode == 2'd2) begin
+                    if (at_a_msb) at_a_res = {at_a_res[14:0], lp_in[sample_lp]};
+                    else at_a_res[at_a_done] = lp_in[sample_lp];
+                  end
+                  if (drive_clk) begin
+                    mode_a = pm_of(clk_lp);
+                    if (mode_a == PM_OD) begin
+                      if (clk_idle == 1'b0) begin at_drv_val[clk_lp]=1'b0; at_drv_oe[clk_lp]=1'b1; end
+                      else at_drv_oe[clk_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[clk_lp]=clk_idle; at_drv_oe[clk_lp]=1'b1;
+                    end
+                  end
+                end else begin
+                  if (drive_clk) begin
+                    mode_a = pm_of(clk_lp);
+                    if (mode_a == PM_OD) begin
+                      if (clk_idle == 1'b0) begin at_drv_val[clk_lp]=1'b0; at_drv_oe[clk_lp]=1'b1; end
+                      else at_drv_oe[clk_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[clk_lp]=clk_idle; at_drv_oe[clk_lp]=1'b1;
+                    end
+                  end
+                  if ((at_a_mode == 2'd0 || at_a_mode == 2'd2) &&
+                      (at_a_done != at_a_nm1)) begin
+                    rem = at_a_nm1 - at_a_done;
+                    sh = at_a_msb ? (rem - 4'd1) : (at_a_done + 4'd1);
+                    bit_a = at_a_data[sh[2:0]];
+                    mode_a = pm_of(dout_lp);
+                    if (mode_a == PM_OD) begin
+                      if (bit_a == 1'b0) begin at_drv_val[dout_lp]=1'b0; at_drv_oe[dout_lp]=1'b1; end
+                      else at_drv_oe[dout_lp]=1'b0;
+                    end else if (mode_a != PM_IN) begin
+                      at_drv_val[dout_lp]=bit_a; at_drv_oe[dout_lp]=1'b1;
+                    end
+                  end
+                end
+                if (at_a_mode == 2'd2 && pm_of(dout_lp) == PM_OD &&
+                    outb == 1'b1 && lp_in[dout_lp] == 1'b0)
+                  arb_pulse = 1'b1;
+                at_a_half = 1'b0;
+                if (at_a_done == at_a_nm1) begin
+                  if (at_res_valid)
+                    overrun_pulse = 1'b1;
+                  if (at_a_mode == 2'd0) at_result = {8'h0, at_a_data};
+                  else at_result = at_a_res;
+                  at_res_valid = 1'b1;
+                  at_a_k = at_p_k;
+                  at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
+                  at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
+                  at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
+                  at_a_done = 4'd0; at_a_res = 16'h0; at_a_half = 1'b0;
+                  at_p_k = 2'd0;
+                  at_cpha0_on_promote = 1'b1;
+                end else begin
+                  at_a_done = at_a_done + 4'd1;
+                end
+              end
             end else begin
-              at_a_done = at_a_done + 4'd1;
+              // ---- Single tick per bit ----
+              if (at_a_mode == 2'd0 || at_a_mode == 2'd2) begin
+                mode_a = pm_of(dout_lp);
+                if (mode_a == PM_OD) begin
+                  if (outb == 1'b0) begin at_drv_val[dout_lp]=1'b0; at_drv_oe[dout_lp]=1'b1; end
+                  else at_drv_oe[dout_lp]=1'b0;
+                end else if (mode_a != PM_IN) begin
+                  at_drv_val[dout_lp]=outb; at_drv_oe[dout_lp]=1'b1;
+                end
+              end
+              if (at_a_mode == 2'd1 || at_a_mode == 2'd2) begin
+                if (at_a_msb) at_a_res = {at_a_res[14:0], lp_in[sample_lp]};
+                else at_a_res[at_a_done] = lp_in[sample_lp];
+              end
+              if (at_a_mode == 2'd2 && pm_of(dout_lp) == PM_OD &&
+                  outb == 1'b1 && lp_in[dout_lp] == 1'b0)
+                arb_pulse = 1'b1;
+              if (at_a_done == at_a_nm1) begin
+                if (at_res_valid)
+                  overrun_pulse = 1'b1;
+                if (at_a_mode == 2'd0) at_result = {8'h0, at_a_data};
+                else at_result = at_a_res;
+                at_res_valid = 1'b1;
+                at_a_k = at_p_k;
+                at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
+                at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
+                at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
+                at_a_done = 4'd0; at_a_res = 16'h0; at_a_half = 1'b0;
+                at_p_k = 2'd0;
+                at_cpha0_on_promote = 1'b1;
+              end else begin
+                at_a_done = at_a_done + 4'd1;
+              end
             end
           end
         end else if (at_a_k == 2'd3) begin
@@ -433,8 +583,26 @@ module tick_queue (
           at_a_oe = at_p_oe; at_a_mask = at_p_mask; at_a_val = at_p_val;
           at_a_mode = at_p_mode; at_a_nm1 = at_p_nm1; at_a_data = at_p_data;
           at_a_msb = at_p_msb; at_a_in_t = at_p_in_t; at_a_lp = at_p_lp;
-          at_a_done = 4'd0; at_a_res = 16'h0;
+          at_a_done = 4'd0; at_a_res = 16'h0; at_a_half = 1'b0;
           at_p_k = 2'd0;
+          at_cpha0_on_promote = 1'b1;
+        end
+      end
+      // CPHA=0 + CLK_EN: first DOUT bit when a pending XFER becomes active.
+      if (at_cpha0_on_promote && at_a_k == 2'd2 && cfg_clk_en && !cfg_cpha &&
+          !at_a_in_t && (at_a_mode == 2'd0 || at_a_mode == 2'd2)) begin
+        outb = at_a_msb ? at_a_data[at_a_nm1[2:0]] : at_a_data[0];
+        mode_a = pm_of(dout_lp);
+        if (mode_a == PM_OD) begin
+          if (outb == 1'b0) begin
+            at_drv_val[dout_lp] = 1'b0;
+            at_drv_oe[dout_lp]  = 1'b1;
+          end else begin
+            at_drv_oe[dout_lp] = 1'b0;
+          end
+        end else if (mode_a != PM_IN) begin
+          at_drv_val[dout_lp] = outb;
+          at_drv_oe[dout_lp]  = 1'b1;
         end
       end
     end
@@ -452,6 +620,7 @@ module tick_queue (
     a_in_t_d = at_a_in_t; p_in_t_d = at_p_in_t;
     a_lp_d = at_a_lp; p_lp_d = at_p_lp;
     a_done_d = at_a_done; a_res_d = at_a_res;
+    a_half_d = at_a_half;
     miss_d = at_miss;
     res_valid_d = at_res_valid;
     result_d = at_result;
@@ -466,6 +635,7 @@ module tick_queue (
 
     mode_b = 2'd0;
     bit_b = 1'b0;
+    post_outb = 1'b0;
     if (run && pin_we) begin
       for (int i = 0; i < 4; i = i + 1) begin
         if (pin_mask[i]) begin
@@ -494,13 +664,34 @@ module tick_queue (
         a_kind_d = post_kind;
         a_in_t_d = post_in_t;
         a_lp_d = post_lp;
+        a_half_d = 1'b0;
         if (post_kind == 2'd1) begin
           a_oe_d = post_oe; a_mask_d = post_mask; a_val_d = post_val;
         end else begin
           a_mode_d = post_mode; a_nm1_d = post_nm1; a_data_d = post_data;
           a_msb_d = post_msb; a_done_d = 4'd0; a_res_d = 16'h0;
+          // CPHA=0 + engine clock: first DOUT bit when the job becomes active.
+          if (cfg_clk_en && !cfg_cpha && !post_in_t &&
+              (post_kind == 2'd2) &&
+              (post_mode == 2'd0 || post_mode == 2'd2)) begin
+            // First bit index: MSB → nm1, LSB → 0.
+            post_outb = post_msb ? post_data[post_nm1[2:0]] : post_data[0];
+            mode_b = pm_of(dout_lp);
+            if (mode_b == PM_OD) begin
+              if (post_outb == 1'b0) begin
+                drv_val_d[dout_lp] = 1'b0;
+                drv_oe_d[dout_lp]  = 1'b1;
+              end else begin
+                drv_oe_d[dout_lp] = 1'b0;
+              end
+            end else if (mode_b != PM_IN) begin
+              drv_val_d[dout_lp] = post_outb;
+              drv_oe_d[dout_lp]  = 1'b1;
+            end
+          end
         end
       end else begin
+        // Pending slot: do not drive DOUT — job has not started yet.
         p_kind_d = post_kind;
         p_in_t_d = post_in_t;
         p_lp_d = post_lp;
@@ -563,6 +754,7 @@ module tick_queue (
       a_nm1_q <= 4'd0; p_nm1_q <= 4'd0;
       a_data_q <= 8'h0; p_data_q <= 8'h0;
       a_done_q <= 4'd0; a_res_q <= 16'h0;
+      a_half_q <= 1'b0;
       a_msb_q <= 1'b0; p_msb_q <= 1'b0;
       a_in_t_q <= 1'b0; p_in_t_q <= 1'b0;
       a_lp_q <= 2'd0; p_lp_q <= 2'd0;
@@ -585,6 +777,7 @@ module tick_queue (
       a_nm1_q <= a_nm1_d; p_nm1_q <= p_nm1_d;
       a_data_q <= a_data_d; p_data_q <= p_data_d;
       a_done_q <= a_done_d; a_res_q <= a_res_d;
+      a_half_q <= a_half_d;
       a_msb_q <= a_msb_d; p_msb_q <= p_msb_d;
       a_in_t_q <= a_in_t_d; p_in_t_q <= p_in_t_d;
       a_lp_q <= a_lp_d; p_lp_q <= p_lp_d;

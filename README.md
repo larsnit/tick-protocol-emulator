@@ -144,6 +144,38 @@ config registers (demos often use `uio[0]`).
 **Waveforms:** `make test-rtl` writes `verification/rtl/tb.fst`. Open it in
 [Surfer](https://surfer-project.org/) or GTKWave.
 
+## Max SCLK (RTL, 50 MHz clk)
+
+SPI **target** max SCLK is measured host-style: the testbench drives SCLK with
+Timer (sub-cycle phase), and samples **MISO on the SCLK rising edge**
+(`verification/rtl/test_spi_i2c_milestones.py`, `test_spi_target_miso_timing.py`).
+Alternating MISO (`0xAA`/`0x55`) catches stale bits.
+
+**Guaranteed target SCLK with MISO: `f_clk/8` (6.25 MHz @ 50 MHz clk).**
+Reasoning (mode 0): a 2-flop synchroniser adds up to ~2 clk of edge jitter;
+MISO is registered out (~1 clk) after the launch (falling) tick; the host needs
+setup before the sample rise. That budget is ~3 clk after fall, so the
+half-period must be ≥4 clk → period ≥8. Use this figure for real hosts / silicon.
+
+**Simulation (zero-delay) limit** is tighter and **not** a timing guarantee: NBA
+can make MISO appear on the same clk edge the testbench samples, so period 4
+(12.5 MHz) can still pack correct bits in RTL sim. Treat that as a functional
+checker pass only.
+
+| Role | Mode | Path | Min period (clk) | Max SCLK | Note |
+|---|---|---|---|---|---|
+| SPI controller (`PER`, engine clock) | 0 | — | PER=2 → period 4 | **12.5 MHz** | |
+| SPI target | 0/3 | MOSI-only | 2.0 | 25.0 MHz | sim / receive path |
+| SPI target | 0/3 | MOSI+MISO | **8** | **6.25 MHz** | **guaranteed** |
+| SPI target | 0/3 | MOSI+MISO | 4.0 | 12.5 MHz | sim zero-delay only |
+
+Pin timing (mode 0, Timer SCLK, 8 sub-cycle phases within one 20 ns clk,
+half-period 85 ns): MISO changes after the **falling** launch edge;
+fall→MISO **43–61 ns**; margin to the host sample rise **24–42 ns**
+(`MISO_TIMING_NS` in the cocotb log). At period 4 the half is only 40 ns, so
+43–61 ns of pad delay overruns the sample edge — sim can still pass via
+zero-delay NBA on a shared clk edge.
+
 ## Verification
 
 | Level | How to run | Current result |

@@ -21,7 +21,7 @@ executable reference.
 | Timed-queue ordering | A new timed op goes into the queue **after** the current cycle's tick has been applied (post-tick state). ISS and RTL must do exactly the same |
 | Tick-consuming WAIT | A `WAIT` with TICK in its mask is a real queue entry that consumes a tick. Three new rules: same-cycle event and tick; starting a stopped timer; illegal combinations |
 | MFS RX carry | `MFS rd, RX` always sets `C := result[8]` |
-| Engine clock | **Approved (§4):** two ticks per bit in both roles; CLK_EN/CLK_LP/CPOL/CPHA in the configuration register map; Stage 2d (pin-edge ticks) merges into the engine-clock RTL step |
+| Engine clock | **Approved (§4):** two ticks per bit in both roles; CLK_EN/CLK_LP/CPOL/CPHA; pin-edge ticks share the input sync path; effective tick pin = CLK_LP when CLK_EN && pin-edge |
 | XFER width | `XFER` out/both: 1–8 bits; in: 1–16 bits |
 | Engine pin selection | Engine pins (DOUT, DIN, CLK) are chosen per context, not hard-wired to LP0/LP1 |
 | — | Read-back latency fixed at **3 cycles** |
@@ -68,6 +68,12 @@ executable reference.
      tick 0 = post time + `PHASE`. When `PHASE = 0` there is no phase countdown
      — tick 0 is one `PER` after the post (period accumulator from zero). When
      `PHASE ≥ 1`, tick 0 is exactly `PHASE` cycles after the post.
+     **Pin-edge tick source:** the same post still sets `timer_run` (arms
+     "running"), even though ticks come from the pin. That is what makes
+     rule 5 (MISS / stretch) apply between START and the next timed job — e.g.
+     an I2C target stretching SCL while the host is late. Idle waits that must
+     *not* arm MISS (deselected SPI CS, I2C bus idle) use `WAIT …, idle`
+     (`tc=idle`) so the timer stays stopped while pin edges continue.
 5. **A tick that passes with nothing in the active slot, while the timer runs,
    sets `MISS`.** A per-context policy decides what happens next:
    - *flag and continue*: stay on the tick grid;
@@ -216,10 +222,11 @@ block. Shared registers (`0x00`–`0x0F`) are always writable.
 the **same registers**. The host loads the initial value; the program may
 overwrite them at run time.
 
-**Target clock pin:** with `CLK_EN=1` and tick source = pin-edge, the tick pin
-**is** `CLK_LP` (one source of truth). The `TICK.tick_pin` field is ignored in
-that mode; if software writes a differing `tick_pin`, `ERR.CFG` is set and
-`CLK_LP` wins.
+**Effective tick pin (combinational):** each cycle,
+`effective_tick_lp = (CLK_EN && tick source == pin-edge) ? CLK_LP : TICK.tick_pin`.
+In engine-clock target mode the `TICK.tick_pin` field is simply ignored — it is
+not rewritten and a mismatch does **not** set `ERR.CFG`. The same rule applies
+whether `CLK_EN` was set via the config map or `MTS ECFG`.
 
 #### Shared (`0x00`–`0x0F`)
 
@@ -238,7 +245,7 @@ that mode; if software writes a differing `tick_pin`, `ERR.CFG` is set and
 | `0x03` | PINIDLE | `[3:0]` | Idle level after trap |
 | `0x04` | ENGINE | `[1:0]` DOUT_LP, `[3:2]` DIN_LP, `[5:4]` CLK_LP, `[6]` MSB_FIRST, `[7]` CLK_EN | |
 | `0x05` | CLKCFG | `[0]` CPOL, `[1]` CPHA | Ignored if `CLK_EN=0` |
-| `0x06` | TICK | `[0]` source (`0` timer, `1` pin), `[1]` rise (ignored if `CLK_EN`), `[3:2]` tick_pin LP | See target-clock rule above |
+| `0x06` | TICK | `[0]` source (`0` timer, `1` pin), `[1]` rise (ignored if `CLK_EN`), `[3:2]` tick_pin LP | See effective tick pin above |
 | `0x07` | MISS | `[1:0]` policy, `[7:2]` trap vector | Policy: `0` flag, `1` trap (uses **this** vector, not EV0), `2` send-default, `3` stretch |
 | `0x08` | DEFAULT | `[7:0]` | Default byte for send-default / `PULL.NB` |
 | `0x09` | PER_L | `[7:0]` | Same register as `MTS PER_L` |
@@ -260,9 +267,9 @@ that mode; if software writes a differing `tick_pin`, `ERR.CFG` is set and
 #### Dual-map and sticky errors
 
 Two logical pins → one physical: **lower LP index wins**; sticky `ERR.MAP`
-(bit 4). Config violations (write while enabled, CLK_LP/tick_pin mismatch with
-`CLK_EN`): sticky `ERR.CFG` (bit 5). Bits: `MISS=0`, `UNDER=1`, `OVERRUN=2`,
-`ARB=3`, `MAP=4`, `CFG=5`. Write-1-to-clear via `MTS ERR`.
+(bit 4). Config violations (write while enabled): sticky `ERR.CFG` (bit 5).
+Bits: `MISS=0`, `UNDER=1`, `OVERRUN=2`, `ARB=3`, `MAP=4`, `CFG=5`.
+Write-1-to-clear via `MTS ERR`.
 
 #### ISS / RTL helper
 
@@ -434,26 +441,33 @@ toggled a clock.
 
 **Behaviour:** with `CLK_EN` set, **each XFER bit takes two ticks**, a leading
 and a trailing one. `PER` is therefore half a bit period (bit rate = f_clk / (2 · PER)).
-(Engine-clock RTL lands with Stage 2d; until then `CLK_EN` is stored and
-visible via ECFG/config readback but does not yet split ticks.)
 
 | | Leading tick | Trailing tick |
 |---|---|---|
 | CPHA = 0 | Clock to active level; **sample** DIN | Clock to idle; **drive** the next DOUT bit |
 | CPHA = 1 | Clock to active level; **drive** DOUT | Clock to idle; **sample** DIN |
 
-- **CPHA = 0:** the first data bit is driven when the job is **posted**, before
+- **CPHA = 0:** the first data bit is driven when the job **starts** (becomes
+  active — posted into an empty active slot, or promoted from pending), before
   the first leading edge (at least half a period of setup when the timer runs).
+  Posting into the pending slot while another XFER is active must **not** drive.
 - **Controller:** tick source = timer; the engine drives `CLK_LP`.
-- **Target:** tick source = the clock pin; **both** of its edges are ticks; the
-  engine does not drive the clock. Same sample/drive split as the controller.
+- **Target:** tick source = pin-edge on the effective tick pin (`CLK_LP` when
+  `CLK_EN`); **both** edges are ticks; the engine does not drive the clock.
+  Same sample/drive split as the controller.
+- **Illegal when `CLK_EN`:** `DOUT_LP` or `DIN_LP` must not equal `CLK_LP`.
+  With CPHA=0 the first-bit / trailing drive on DOUT shares the tick pin and
+  feeds back through the input sync, desynchronizing pin-edge ticks (and can
+  corrupt samples on DIN). Controllers that drive `CLK_LP` separately are fine;
+  targets must map data and clock to different logical pins.
+- **Single-edge mode** (`CLK_EN=0`, pin-edge ticks on rise *or* fall only) is
+  **not suitable for SPI or I2C targets**: drive and sample happen on the same
+  edge, so open-drain / MISO updates race the sample and can look like STOP or
+  corrupt data. Use the engine clock for those protocols.
 - **I2C SCL-release wait** (controller OD clock: wait until SCL reads back high
   before the next half-period, re-arm from the observed edge): **deferred**.
   Controllers without it still work with targets that never stretch.
 - **START/STOP** are `SET.T` sequences on the timer, never untimed `SET`.
-
-**RTL sequencing:** Stage 2d (pin-edge ticks) merges into the engine-clock
-implementation step; single-edge pin ticks alone are not a separate freeze gate.
 
 ---
 
@@ -514,7 +528,7 @@ rises, configured as a trap to `desel`. Empty-FIFO policy: send default 0xFF.
 idle:  WAIT    ev0
        SET.E   miso=on
        PULL.NB r0
-       XFER    r0, 8, both     ; bit 7 driven immediately (CPHA 0)
+       XFER    r0, 8, both     ; bit 7 driven when this job becomes active (CPHA 0)
 loop:  PULL.NB r0              ; reply byte prepared one byte ahead
        XFER    r0, 8, both     ; queued: no gap at the byte boundary
        MFS     r1, RX          ; byte just received from the controller

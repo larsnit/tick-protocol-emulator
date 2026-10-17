@@ -3,7 +3,7 @@
 ; LP0=SDA OD, LP1=SCL OD; tick=SCL rise; miss=stretch; MSB first
 ; 7-bit address 0x28 → expect address byte 0x50 (write) / 0x51 (read)
 
-idle:  WAIT   ev0
+idle:  WAIT   ev0, idle       ; stop timer so pin ticks while idle are not MISS
 addr:  XFER   8, in
        MFS    r0, RX
        ALU    MOV r3, r0

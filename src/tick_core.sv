@@ -160,7 +160,7 @@ module tick_core (
 
   wire internal_run = run & enable0;
 
-  wire        tick, tick_r, timer_run;
+  wire        timer_tick, tick_r, timer_run;
   wire [15:0] time_cnt;
   wire [19:0] per_fp_obs;
   wire [15:0] phase_cfg_obs;
@@ -193,7 +193,7 @@ module tick_core (
       .rearm(t_rearm),
       .per_fp(per_fp),
       .phase_cfg(phase_cfg),
-      .tick(tick),
+      .tick(timer_tick),
       .tick_r(tick_r),
       .timer_run(timer_run),
       .time_cnt(time_cnt),
@@ -237,6 +237,7 @@ module tick_core (
       end else begin
         sync0 <= pin_raw;
         sync1 <= sync0;
+        // maj0<=sync0: with NBA this equals new sync1 (ISS maj_hist[0]=sync1 after shift).
         maj0  <= sync0;
         maj1  <= maj0;
         maj2  <= maj1;
@@ -275,8 +276,8 @@ module tick_core (
   wire [1:0]  at_a_kind, at_p_kind;
   wire        at_slots_full;
   wire        event_wait_done, tick_wait_done;
-  wire        miss, miss_comb, res_valid;
-  wire [15:0] result;
+  wire        miss, miss_comb, res_valid, res_valid_comb;
+  wire [15:0] result, result_comb;
   wire [1:0]  a_kind, p_kind;
   wire        waiting;
   wire [4:0]  wait_mask;
@@ -292,7 +293,7 @@ module tick_core (
   wire        in_t_done, in_t_bit;
   wire        host_data = !tx_empty;
   wire        host_space = !rx_full;
-  wire [3:0]  ev_live, ev_wait, ev_pending;
+  wire [3:0]  ev_live, ev_wait, ev_pending, ev_lp_prev;
   wire        event_trap_req;
   wire [5:0]  event_trap_vec;
   wire [3:0]  event_trap_bit;
@@ -300,9 +301,25 @@ module tick_core (
   wire        pending_clear_en;
   wire [3:0]  pending_clear_mask;
   wire        stretching_obs;
+
+  // Effective tick LP: CLK_LP when engine-clock target, else TICK.pin (docs §2.1).
+  wire [1:0]  eff_tick_lp = (clk_en && tick_src) ? clk_lp : tick_pin;
+  wire        pin_now  = lp_in[eff_tick_lp];
+  wire        pin_prev = ev_lp_prev[eff_tick_lp];
+  wire        pin_tick = clk_en ? (pin_prev != pin_now)
+                       : (tick_rise ? (~pin_prev & pin_now) : (pin_prev & ~pin_now));
+  // tick_src: 0=timer, 1=pin-edge (same encoding as cfg TICK[0]).
+  wire        tick_raw = tick_src ? pin_tick : timer_tick;
   // Event traps suppress tick consume this cycle (ISS: trap before emit).
-  wire        tick_eff = tick & ~event_trap_req;
+  wire        tick_eff = tick_raw & ~event_trap_req;
   wire        trap_cancel = event_trap_req;
+  reg         tick_obs_q;
+  always @(posedge clk or negedge rst_n) begin
+    if (!rst_n)
+      tick_obs_q <= 1'b0;
+    else
+      tick_obs_q <= internal_run ? tick_eff : 1'b0;
+  end
 
   tick_events u_events (
       .clk(clk),
@@ -325,6 +342,7 @@ module tick_core (
       .ev_live(ev_live),
       .ev_wait(ev_wait),
       .ev_pending(ev_pending),
+      .lp_prev(ev_lp_prev),
       .trap_req(event_trap_req),
       .trap_vec(event_trap_vec),
       .trap_ev_bit(event_trap_bit)
@@ -336,6 +354,7 @@ module tick_core (
       .run(internal_run),
       .tick(tick_eff),
       .timer_run(timer_run),
+      .tick_src(tick_src),
       .lp_in(lp_in),
       .pinmode0(pinmode0),
       .pinmode1(pinmode1),
@@ -352,6 +371,9 @@ module tick_core (
       .miss_pol(miss_pol),
       .default_byte(default_byte),
       .cfg_msb_first(msb_first),
+      .cfg_clk_en(clk_en),
+      .cfg_cpha(cpha),
+      .cfg_cpol(cpol),
       .ev_wait(ev_wait),
       .trap_cancel(trap_cancel),
       .waiting(waiting),
@@ -389,6 +411,8 @@ module tick_core (
       .miss_comb(miss_comb),
       .res_valid(res_valid),
       .result(result),
+      .res_valid_comb(res_valid_comb),
+      .result_comb(result_comb),
       .uio_out(q_uio_out),
       .uio_oe(q_uio_oe),
       .uio_out_comb(q_uio_out_c),
@@ -452,8 +476,9 @@ module tick_core (
       .rx_full(rx_full),
       .rx_wr(rx_wr),
       .rx_wdata(rx_wdata),
-      .res_valid(res_valid),
-      .result(result),
+      // Combo: MFS RX must see XFER complete this cycle (ISS _service_waits).
+      .res_valid(res_valid_comb),
+      .result(result_comb),
       .res_take(res_take),
       .miss_clear(miss_clear),
       .err_clear(err_clear),
@@ -498,13 +523,14 @@ module tick_core (
   assign dbg_pc        = pc;
   assign dbg_waiting   = waiting;
   assign dbg_miss      = miss;
-  assign dbg_tick      = tick_r;
+  assign dbg_tick      = tick_obs_q;
   assign dbg_timer_run = timer_run;
   assign dbg_a_kind    = a_kind;
   assign dbg_p_kind    = p_kind;
 
+  // Registered res_valid/result kept for queue observability; issue uses *_comb.
   wire _unused = &{per_fp_obs, phase_cfg_obs, cfg_base, cfg_bound,
-                   tick_src, tick_rise, tick_pin, ev_live, stretching_obs, 1'b0};
+                   tick_r, ev_live, stretching_obs, res_valid, result, 1'b0};
 endmodule
 
 `default_nettype wire

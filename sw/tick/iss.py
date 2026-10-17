@@ -311,7 +311,6 @@ class Machine:
             c.clk_lp = (val >> 4) & 3
             c.ecfg_msb_first = bool(val & 0x40)
             c.ecfg_clk_en = bool(val & 0x80)
-            self._sync_clk_tick_pin(c)
         elif off == C.OFF_CLKCFG:
             c.ecfg_cpol = bool(val & 1)
             c.ecfg_cpha = bool(val & 2)
@@ -319,7 +318,6 @@ class Machine:
             c.tick_source = TickSource(val & 1)
             c.tick_on_rise = bool(val & 2)
             c.tick_pin = (val >> 2) & 3
-            self._sync_clk_tick_pin(c)
         elif off == C.OFF_MISS:
             c.miss_policy = MissPolicy(val & 3)
             c.miss_vector = (val >> 2) & 0x3F
@@ -354,11 +352,11 @@ class Machine:
                 c.events[ei].vector = (val >> 1) & 0x3F
                 c.events[ei].latched = bool(val & 0x80)
 
-    def _sync_clk_tick_pin(self, c: Context) -> None:
+    def _effective_tick_lp(self, c: Context) -> int:
+        """Combinational tick pin: CLK_LP when engine-clock target, else TICK.pin."""
         if c.ecfg_clk_en and c.tick_source == TickSource.PIN_EDGE:
-            if c.tick_pin != c.clk_lp:
-                c.cfg_err = True
-            c.tick_pin = c.clk_lp
+            return c.clk_lp & 3
+        return c.tick_pin & 3
 
     def host_push(self, data: int, last: bool = False, cmd: bool = False) -> None:
         if len(self.host_to_core) >= HOST_FIFO_DEPTH:
@@ -494,8 +492,9 @@ class Machine:
 
     def _emit_tick(self, c: Context) -> bool:
         if c.tick_source == TickSource.PIN_EDGE:
-            pin = self._pin_now(c, c.tick_pin)
-            prev = self._pin_prev(c, c.tick_pin)
+            lp = self._effective_tick_lp(c)
+            pin = self._pin_now(c, lp)
+            prev = self._pin_prev(c, lp)
             if c.ecfg_clk_en:
                 # Both edges are ticks (engine clock, target mode).
                 return prev != pin
@@ -533,9 +532,24 @@ class Machine:
             return True
         return False
 
+    def _drive_cpha0_first_bit(self, c: Context) -> None:
+        """CPHA=0 + CLK_EN: first DOUT bit when an OUT/BOTH XFER becomes active."""
+        op = c.timed_active
+        if op is None or op.kind != "xfer" or op.job is None:
+            return
+        job = op.job
+        if (
+            c.ecfg_clk_en
+            and not c.ecfg_cpha
+            and job.mode in (XferMode.OUT, XferMode.BOTH)
+        ):
+            self._drive_lp(c, c.dout_lp, self._out_bit(job))
+
     def _promote(self, c: Context) -> None:
         c.timed_active = c.timed_pending
         c.timed_pending = None
+        # Job starts now — not when it was queued behind an active XFER.
+        self._drive_cpha0_first_bit(c)
 
     def _on_tick(self, c: Context) -> None:
         if c.timed_active is None:
@@ -711,7 +725,7 @@ class Machine:
                     if drive_clk:
                         self._drive_lp(c, c.clk_lp, self._clk_active_level(c))
                 else:
-                    # CPHA=0: data already valid (first bit on post); sample + clock active
+                    # CPHA=0: data already valid (first bit when job became active)
                     if job.mode in (XferMode.IN, XferMode.BOTH):
                         self._sample_din(c, job)
                     if drive_clk:
@@ -798,7 +812,10 @@ class Machine:
                     c.drive_oe |= 1 << i
 
     def _ensure_timer_for_timed(self, c: Context) -> None:
-        if c.tick_source == TickSource.TIMER and not c.timer_running:
+        # Arm timer on any timed post (docs §2 rule 4), including pin-edge:
+        # ticks still come from the pin, but timer_run gates MISS (rule 5) so
+        # policies like stretch work for I2C targets.
+        if not c.timer_running:
             self._start_timer(c)
 
     def _exec(self, ci: int) -> None:
@@ -877,17 +894,14 @@ class Machine:
             if d["mode"] in (XferMode.OUT, XferMode.BOTH) and n > 8:
                 raise ValueError("XFER out/both width must be 1..8")
             job = Job(d["mode"], n, data, msb_first=c.ecfg_msb_first)
-            if c.tick_source == TickSource.TIMER:
-                self._ensure_timer_for_timed(c)
+            self._ensure_timer_for_timed(c)
+            became_active = c.timed_active is None
             if not self._post_timed(c, TimedOp("xfer", job=job)):
                 return
-            # CPHA=0 + engine clock: first DOUT bit when the job is posted.
-            if (
-                c.ecfg_clk_en
-                and not c.ecfg_cpha
-                and d["mode"] in (XferMode.OUT, XferMode.BOTH)
-            ):
-                self._drive_lp(c, c.dout_lp, self._out_bit(job))
+            # CPHA=0 + engine clock: first DOUT bit when the job *starts*
+            # (becomes active), not when it lands in pending behind another XFER.
+            if became_active:
+                self._drive_cpha0_first_bit(c)
             c.pc = next_pc
             return
 
@@ -1142,7 +1156,13 @@ class Machine:
         return levels
 
     def _shift_own_delay(self) -> None:
-        cur = [self.phys_drive[p] & 1 for p in range(8)]
+        # Match RTL map_out→own_d: only driven pins contribute; undriven map
+        # bits are 0. Feeding stale phys_drive while OE is off made a later
+        # OE re-enable look like an immediate rise in the sync path (ISS early
+        # vs RTL after SET.E clear then trap/idle restore).
+        cur = [
+            (self.phys_drive[p] & 1) if self.phys_oe[p] else 0 for p in range(8)
+        ]
         if _OWN_SAMPLE_DELAY == 0:
             self._own_delay = [cur]
         else:

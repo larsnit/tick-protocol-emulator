@@ -1,8 +1,4 @@
-"""Strict xfail: MTS ECFG with CLK_EN=1 diverges ISS vs RTL until Stage 2d.
-
-Remove this expect_fail marker AND the matching NOT_YET_IN_RTL entry in
-test_iss_rtl_fuzz.py when engine-clock RTL lands.
-"""
+"""MTS ECFG with CLK_EN=1: ISS↔RTL pin lockstep (engine clock landed)."""
 
 from __future__ import annotations
 
@@ -21,7 +17,6 @@ from tick.cfg import dict_to_bytes
 from tick.isa import JmpCond, Spr, XferMode, encode_jmp, encode_ldi, encode_mts, encode_xfer
 from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
 
-# Minimal: enable full ECFG nibble then post 1-bit IN (timer ticks).
 IMG = [
     encode_ldi(1, 0x0F),  # MSB|CLK_EN|CPHA|CPOL
     encode_mts(1, Spr.ECFG),
@@ -71,12 +66,9 @@ def _iss_trace():
     return tr
 
 
-@cocotb.test(
-    expect_fail=True,
-    skip=False,
-)
-async def lockstep_clk_en_expect_fail(dut):
-    """engine clock not yet in RTL — remove this marker AND the NOT_YET_IN_RTL entry when it lands"""
+@cocotb.test()
+async def lockstep_clk_en_after_mts_ecfg(dut):
+    """CLK_EN via MTS ECFG: pad drive matches ISS (two ticks per bit)."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     iss = _iss_trace()
     await reset_dut(dut)
@@ -94,12 +86,6 @@ async def lockstep_clk_en_expect_fail(dut):
     for i in range(N_CYC):
         io, ie = iss[i]
         ro, re = rtl[i + ALIGN]
-        if ie != re or (io & ie) != (ro & re):
-            raise AssertionError(
-                f"CLK_EN lockstep gap cy={i} ISS=({io:#04x},{ie:#04x}) "
-                f"RTL=({ro:#04x},{re:#04x}) — see isa.md §4 Stage 2d"
-            )
-    raise AssertionError(
-        "expected CLK_EN pin mismatch but ISS and RTL agreed — "
-        "engine clock may have landed; remove expect_fail and NOT_YET_IN_RTL"
-    )
+        assert ie == re and (io & ie) == (ro & re), (
+            f"CLK_EN lockstep cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"
+        )

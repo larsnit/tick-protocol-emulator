@@ -38,6 +38,7 @@ module tick_issue (
     input  wire        rx_full,
     output reg         rx_wr,
     output reg  [9:0]  rx_wdata,
+    // Combinational after-tick result (queue res_valid_comb / result_comb).
     input  wire        res_valid,
     input  wire [15:0] result,
     output reg         res_take,
@@ -272,6 +273,9 @@ module tick_issue (
       end
 
       // Issue: after trap, waiting is clear and imem fetch_pc = vector.
+      // Operand reads use rf_d (not rf_q): PULL/MFS wait-completion may have
+      // written rf_d this cycle, and ISS _service_waits updates regs before
+      // _exec — so MOV/XFER/etc. must see the bypassed value same cycle.
       if (!waiting_d) begin
         case (op)
           4'b0000: begin // SET
@@ -347,7 +351,7 @@ module tick_issue (
               4'd3: take = c_d;
               4'd4: take = ~c_d;
               4'd5: begin // r1--
-                was_r1 = rf_q[1];
+                was_r1 = rf_d[1];
                 rf_d[1] = was_r1 - 8'd1;
                 z_d = (was_r1 - 8'd1) == 8'h0;
                 take = (was_r1 != 8'h0);
@@ -373,8 +377,8 @@ module tick_issue (
             issued = 1'b1;
           end
           4'b0101: begin // ALU
-            a = rf_q[rd];
-            b = rf_q[rs];
+            a = rf_d[rd];
+            b = rf_d[rs];
             case (alu_fn)
               3'd0: begin // MOV
                 rf_d[rd] = b;
@@ -436,7 +440,7 @@ module tick_issue (
               post_in_t = 1'b0;
               post_mode = instr[5:4];
               post_nm1 = instr[9:6];
-              post_data = rf_q[instr[11:10]];
+              post_data = rf_d[instr[11:10]];
               post_msb = cfg_msb_first;
               issued = 1'b1;
             end
@@ -468,7 +472,7 @@ module tick_issue (
           end
           4'b1000: begin // PUSH
             if (!rx_full) begin
-              rx_wdata = {instr[9:8], rf_q[instr[11:10]]};
+              rx_wdata = {instr[9:8], rf_d[instr[11:10]]};
               rx_wr = 1'b1;
               issued = 1'b1;
             end else stalled = 1'b1;
@@ -476,7 +480,9 @@ module tick_issue (
           4'b1001: begin // MFS
             case (instr[9:6])
               4'd0: begin // RX
-                if (!res_valid) begin
+                // res_take already set → wait-completion consumed it this cycle
+                // (ISS clears result_valid in _service_waits before _exec).
+                if (!res_valid || res_take) begin
                   waiting_d = 1'b1;
                   mfs_block_d = 1'b1;
                   mfs_rd_d = instr[11:10];
@@ -529,7 +535,12 @@ module tick_issue (
                 issued = 1'b1;
               end
               4'd12: begin // PC
-                spr_val = {2'b0, pc_q};
+                // Same-cycle trap: fetch_pc is the vector (ISS sets PC:=vector
+                // before _exec). pc_q is still the pre-trap PC — reading it
+                // here desynchronized MFS PC after MISS/event traps (fuzz 545).
+                spr_val = {2'b0,
+                  trap_req ? trap_vec
+                           : (miss_trap_req ? miss_vec : pc_q)};
                 rf_d[instr[11:10]] = spr_val;
                 z_d = (spr_val == 8'h0);
                 issued = 1'b1;
@@ -552,22 +563,22 @@ module tick_issue (
             case (instr[9:6])
               4'd5: begin
                 err_clear = 1'b1;
-                err_clear_mask = rf_q[instr[11:10]];
-                if (rf_q[instr[11:10]][0]) miss_clear = 1'b1;
+                err_clear_mask = rf_d[instr[11:10]];
+                if (rf_d[instr[11:10]][0]) miss_clear = 1'b1;
               end
-              4'd6: begin per_we = 1'b1; per_sel = 2'd0; per_wdata = rf_q[instr[11:10]]; end
-              4'd7: begin per_we = 1'b1; per_sel = 2'd1; per_wdata = rf_q[instr[11:10]]; end
-              4'd8: begin per_we = 1'b1; per_sel = 2'd2; per_wdata = rf_q[instr[11:10]]; end
-              4'd9: begin phase_we = 1'b1; phase_hi = 1'b0; phase_wdata = rf_q[instr[11:10]]; end
-              4'd10: begin phase_we = 1'b1; phase_hi = 1'b1; phase_wdata = rf_q[instr[11:10]]; end
+              4'd6: begin per_we = 1'b1; per_sel = 2'd0; per_wdata = rf_d[instr[11:10]]; end
+              4'd7: begin per_we = 1'b1; per_sel = 2'd1; per_wdata = rf_d[instr[11:10]]; end
+              4'd8: begin per_we = 1'b1; per_sel = 2'd2; per_wdata = rf_d[instr[11:10]]; end
+              4'd9: begin phase_we = 1'b1; phase_hi = 1'b0; phase_wdata = rf_d[instr[11:10]]; end
+              4'd10: begin phase_we = 1'b1; phase_hi = 1'b1; phase_wdata = rf_d[instr[11:10]]; end
               4'd11: begin
                 ecfg_we = 1'b1;
-                ecfg_wdata = rf_q[instr[11:10]];
+                ecfg_wdata = rf_d[instr[11:10]];
               end
-              4'd12: next_pc = rf_q[instr[11:10]][5:0];
+              4'd12: next_pc = rf_d[instr[11:10]][5:0];
               4'd14: begin // EVCLR: write-1 clear pending
                 pending_clear_en = 1'b1;
-                pending_clear_mask = rf_q[instr[11:10]][3:0];
+                pending_clear_mask = rf_d[instr[11:10]][3:0];
               end
               default: ;
             endcase

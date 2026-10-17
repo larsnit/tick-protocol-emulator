@@ -2,7 +2,7 @@
 ; tick=SCLK; EV0=CS fall; EV1=CS rise trap -> desel
 ; empty FIFO policy: send 0xFF
 
-idle:  WAIT    ev0
+idle:  WAIT    ev0, idle       ; stop timer so SCLK while deselected is not MISS
        SET.E   miso=on
        PULL.NB r0
        XFER    r0, 8, both

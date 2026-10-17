@@ -50,13 +50,6 @@ N_CYC = 80
 ALIGN = 1
 HOST_PRELOAD = 8
 
-# Features the ISS models but RTL does not yet implement. Lockstep forces them
-# off (see force_clk_en_clear). Remove an entry when that feature lands in RTL,
-# and drop the matching expect_fail test.
-NOT_YET_IN_RTL = (
-    "engine clock (CLK_EN / two ticks per bit / CLK_LP drive) — Stage 2d",
-)
-
 MODE_NAMES = {
     PinMode.INPUT: "input",
     PinMode.PUSHPULL: "pushpull",
@@ -64,17 +57,13 @@ MODE_NAMES = {
 }
 
 
-def force_clk_en_clear(ecfg: int) -> int:
-    """ECFG byte with CLK_EN (bit 1) forced 0; MSB/CPHA/CPOL unchanged."""
-    return ecfg & ~0x02
-
-
-def random_ecfg_byte(rng: random.Random, *, msb: bool | None = None) -> int:
-    """Random ECFG nibble with CLK_EN=0 (NOT_YET_IN_RTL)."""
+def random_ecfg_byte(rng: random.Random, *, msb: bool | None = None, clk_en: bool | None = None) -> int:
+    """Random ECFG nibble: MSB | CLK_EN | CPHA | CPOL."""
     bit0 = rng.randrange(2) if msb is None else (1 if msb else 0)
+    bit1 = rng.randrange(2) if clk_en is None else (1 if clk_en else 0)
     bit2 = rng.randrange(2)  # CPHA
     bit3 = rng.randrange(2)  # CPOL
-    return force_clk_en_clear(bit0 | (bit2 << 2) | (bit3 << 3))
+    return bit0 | (bit1 << 1) | (bit2 << 2) | (bit3 << 3)
 
 
 def _seed() -> int:
@@ -160,18 +149,24 @@ def gen_legal_cfg(rng: random.Random) -> dict:
         modes[clk] = PinMode.OPENDRAIN
         pins[clk]["mode"] = PinMode.OPENDRAIN
         pins[clk]["idle"] = 1
+    clk_en = bool(rng.randrange(2))
+    tick_source = rng.choice([TickSource.TIMER, TickSource.PIN_EDGE])
+    # Controller = timer + optionally CLK_EN; target = pin-edge (+ CLK_EN for both edges).
+    tick_pin = clk if (clk_en and tick_source == TickSource.PIN_EDGE) else rng.randrange(4)
+    tick_on_rise = bool(rng.randrange(2))
     return {
         "per": float(rng.choice([4.0, 8.0, 16.0])),
         "phase": 0,
         "msb_first": bool(rng.randrange(2)),
-        # CLK_EN forced off — see NOT_YET_IN_RTL. CPOL/CPHA/MSB stay random.
-        "clk_en": False,
+        "clk_en": clk_en,
         "cpol": bool(rng.randrange(2)),
         "cpha": bool(rng.randrange(2)),
         "dout_lp": dout,
         "din_lp": din,
         "clk_lp": clk,
-        "tick_source": TickSource.TIMER,
+        "tick_source": tick_source,
+        "tick_pin": tick_pin,
+        "tick_on_rise": tick_on_rise,
         "default_byte": rng.randrange(256),
         "miss_policy": miss_pol,
         "miss_vector": rng.randrange(N_WORDS),
@@ -239,9 +234,10 @@ def _coverage_slice(slot: int, cfg: dict) -> list[int]:
         ):
             w += [encode_ldi(0, imm), encode_mts(0, spr)]
         w += [encode_ldi(0, 0), encode_mts(0, Spr.ERR), encode_mts(0, Spr.EVCLR)]
-        # ECFG: random MSB/CPHA/CPOL from cfg; CLK_EN forced 0 (NOT_YET_IN_RTL).
-        ecfg = force_clk_en_clear(
+        # ECFG mirrors configured engine fields (incl. CLK_EN).
+        ecfg = (
             (1 if cfg.get("msb_first", True) else 0)
+            | ((1 if cfg.get("clk_en", False) else 0) << 1)
             | ((1 if cfg.get("cpha", False) else 0) << 2)
             | ((1 if cfg.get("cpol", False) else 0) << 3)
         )
@@ -377,10 +373,12 @@ def gen_program(rng: random.Random, cfg: dict, n: int = N_WORDS, slot: int = 0) 
                  Spr.ECFG, Spr.PC, Spr.EVCLR]
             )
             if spr == Spr.ECFG:
-                # Keep MTS ECFG in the mix; force CLK_EN=0 (NOT_YET_IN_RTL).
                 rd = rng.randrange(4)
                 if len(words) + 2 <= budget:
-                    words.append(encode_ldi(rd, random_ecfg_byte(rng)))
+                    words.append(encode_ldi(
+                        rd,
+                        random_ecfg_byte(rng, clk_en=cfg.get("clk_en")),
+                    ))
                     words.append(encode_mts(rd, Spr.ECFG))
             else:
                 words.append(encode_mts(rng.randrange(4), spr))
@@ -436,6 +434,14 @@ def _cov_init() -> dict:
         },
         "same_cycle_trap_prio": 0,
         "miss_policy": {p.name: 0 for p in MissPolicy},
+        # Engine clock / pin-edge coverage (CPOL × CPHA × role; rise/fall when single-edge).
+        "engine": {
+            f"cpol{cpol}_cpha{cpha}_{role}": 0
+            for cpol in (0, 1)
+            for cpha in (0, 1)
+            for role in ("ctrl", "tgt")
+        },
+        "pin_edge": {"rise": 0, "fall": 0, "both": 0},
     }
 
 
@@ -621,6 +627,12 @@ def _coverage_gaps(cov: dict, *, rare_min: int = 1) -> list[str]:
     for name, c in cov["miss_policy"].items():
         if c == 0:
             missing.append(f"miss.{name}")
+    for name, c in cov["engine"].items():
+        if c == 0:
+            missing.append(f"engine.{name}")
+    for name, c in cov["pin_edge"].items():
+        if c == 0:
+            missing.append(f"pin_edge.{name}")
     return missing
 
 
@@ -631,10 +643,6 @@ async def iss_rtl_random_lockstep(dut):
     n_cyc = _n_cyc()
     rng = random.Random(seed)
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    print("NOT_YET_IN_RTL:")
-    for item in NOT_YET_IN_RTL:
-        print(f"  - {item}")
-    dut._log.info(f"NOT_YET_IN_RTL={list(NOT_YET_IN_RTL)}")
     mismatches = 0
     first_bad = None
     cov = _cov_init()
@@ -656,6 +664,39 @@ async def iss_rtl_random_lockstep(dut):
                 clk = int(cfg.get("clk_lp", 2)) & 3
                 cfg["pins"][clk]["mode"] = PinMode.OPENDRAIN
                 cfg["pins"][clk]["idle"] = 1
+            # Coverage rotation for engine clock / pin-edge.
+            cpol = (trial >> 0) & 1
+            cpha = (trial >> 1) & 1
+            role_tgt = bool((trial >> 2) & 1)
+            slot16 = trial % 16
+            if slot16 < 8:
+                cfg["clk_en"] = True
+                cfg["cpol"] = bool(cpol)
+                cfg["cpha"] = bool(cpha)
+                # Illegal per docs/isa.md §4: DOUT/DIN must not equal CLK_LP
+                # under CLK_EN (sync feedback on the tick pin).
+                clk = int(cfg["clk_lp"]) & 3
+                if int(cfg["dout_lp"]) & 3 == clk:
+                    cfg["dout_lp"] = (clk + 1) & 3
+                if int(cfg["din_lp"]) & 3 == clk:
+                    cfg["din_lp"] = (clk + 2) & 3
+                if role_tgt:
+                    cfg["tick_source"] = TickSource.PIN_EDGE
+                    cfg["tick_pin"] = clk
+                    cov["engine"][f"cpol{cpol}_cpha{cpha}_tgt"] += 1
+                    cov["pin_edge"]["both"] += 1
+                else:
+                    cfg["tick_source"] = TickSource.TIMER
+                    cov["engine"][f"cpol{cpol}_cpha{cpha}_ctrl"] += 1
+            elif slot16 < 12:
+                # Single-edge pin ticks (rise or fall).
+                cfg["clk_en"] = False
+                cfg["tick_source"] = TickSource.PIN_EDGE
+                cfg["tick_on_rise"] = bool(slot16 & 1)
+                if cfg["tick_on_rise"]:
+                    cov["pin_edge"]["rise"] += 1
+                else:
+                    cov["pin_edge"]["fall"] += 1
             for p in cfg["pins"]:
                 cov["pin_mode"][MODE_NAMES[p["mode"]]] += 1
             img = gen_program(rng, cfg, slot=trial)
@@ -674,6 +715,22 @@ async def iss_rtl_random_lockstep(dut):
                 # ARB slots: hold DOUT phys low every cycle; else often low.
                 if trial % 8 == 7 or rng.random() < 0.7:
                     ext[i] &= ~(1 << dout_phys)
+            # Pin-edge: square-wave the effective tick pin so ticks actually fire.
+            # Glitch filter on the tick LP is legal (docs §2 read-back); half=2
+            # keeps edges longer than majority latency so ISS/RTL stay aligned.
+            if cfg.get("tick_source") == TickSource.PIN_EDGE:
+                elp = (
+                    int(cfg["clk_lp"]) & 3
+                    if cfg.get("clk_en")
+                    else int(cfg.get("tick_pin", 2)) & 3
+                )
+                ephys = int(cfg["pins"][elp]["physical"]) & 7
+                half = 2
+                for i in range(len(ext)):
+                    if (i // half) % 2:
+                        ext[i] |= 1 << ephys
+                    else:
+                        ext[i] &= ~(1 << ephys)
 
             iss_trace = iss_pin_trace_cov(img, cfg, n_cyc, ext, host_words, cov)
 
@@ -815,6 +872,30 @@ async def iss_rtl_random_lockstep(dut):
         img = [encode_set(True, False, 0x1, 0x1), encode_jmp(JmpCond.AL, 1)]
         await _probe_lockstep(img, scfg, 24, [0xFF] * 30, check=True)
 
+        # FLAG MISS (sticky bit only) and send-default
+        fcfg = {
+            "per": 4.0,
+            "miss_policy": MissPolicy.FLAG,
+            "pins": [{"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1}],
+            "events": [{"kind": EventKind.HOST_DATA}],
+        }
+        img = [encode_set(True, False, 0x1, 0x1), encode_jmp(JmpCond.AL, 1)]
+        await _probe_lockstep(img, fcfg, 24, [0xFF] * 30, check=True)
+
+        sdcfg = {
+            "per": 4.0,
+            "miss_policy": MissPolicy.SEND_DEFAULT,
+            "default_byte": 0xA5,
+            "dout_lp": 0,
+            "pins": [
+                {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1},
+                {"physical": 1, "mode": PinMode.INPUT, "idle": 1},
+            ],
+            "events": [{"kind": EventKind.HOST_DATA}],
+        }
+        img = [encode_set(True, False, 0x1, 0x1), encode_jmp(JmpCond.AL, 1)]
+        await _probe_lockstep(img, sdcfg, 24, [0xFF] * 30, check=True)
+
         # Trap while WAIT / PULL / MFS / queue-full.
         wait_trap = {
             "per": 8.0,
@@ -907,6 +988,8 @@ async def iss_rtl_random_lockstep(dut):
         for st in ("running", "wait", "pull", "mfs", "queue_full"):
             cov["trap_state"][st] += rare_floor
         cov["same_cycle_trap_prio"] += rare_floor
+        for pol in MissPolicy:
+            cov["miss_policy"][pol.name] += rare_floor
         # JMP E3 not-taken: EVF has E0 only.
         cov["jmp_not"]["E3"] += 1
         # JMP NC taken: C clear after MOV (alu clears C).
