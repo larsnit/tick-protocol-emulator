@@ -831,9 +831,11 @@ class Machine:
 
         if op == Op.SET:
             if d["timed"]:
-                self._ensure_timer_for_timed(c)
+                # Arm timer only after a successful post (docs §2 rule 4: "posted").
+                # A stalled post must not restart the timer (RTL matches).
                 if not self._post_timed(c, TimedOp("set", mask=d["mask"], val=d["val"], oe=d["oe"])):
                     return  # stall
+                self._ensure_timer_for_timed(c)
             else:
                 self._do_set(c, d["mask"], d["val"], oe=d["oe"])
             c.pc = next_pc
@@ -841,9 +843,9 @@ class Machine:
 
         if op == Op.IN:
             if d["timed"]:
-                self._ensure_timer_for_timed(c)
                 if not self._post_timed(c, TimedOp("in", lp=d["lp"])):
                     return
+                self._ensure_timer_for_timed(c)
                 c.waiting = True  # resume when IN consumes a tick
                 c.wait_mask = 1 << 4
             else:
@@ -859,11 +861,14 @@ class Machine:
             mask = d["evmask"]
             if mask & (1 << 4):
                 # Timed WAIT: occupies a queue slot (draft rule 2).
-                self._ensure_timer_for_timed(c)
+                # Illegal: TICK + rearm/idle (docs §2 rule 6c).
+                if tc in (WaitTc.REARM, WaitTc.IDLE):
+                    raise ValueError("WAIT with TICK and tc=rearm/idle is illegal")
                 if not self._post_timed(
                     c, TimedOp("wait", wait_mask=mask, wait_tc=tc)
                 ):
                     return
+                self._ensure_timer_for_timed(c)
             c.waiting = True
             c.wait_mask = mask
             c.wait_tc = tc
@@ -894,10 +899,10 @@ class Machine:
             if d["mode"] in (XferMode.OUT, XferMode.BOTH) and n > 8:
                 raise ValueError("XFER out/both width must be 1..8")
             job = Job(d["mode"], n, data, msb_first=c.ecfg_msb_first)
-            self._ensure_timer_for_timed(c)
             became_active = c.timed_active is None
             if not self._post_timed(c, TimedOp("xfer", job=job)):
                 return
+            self._ensure_timer_for_timed(c)
             # CPHA=0 + engine clock: first DOUT bit when the job *starts*
             # (becomes active), not when it lands in pending behind another XFER.
             if became_active:
@@ -1193,9 +1198,12 @@ class Machine:
             if c.enabled:
                 if c.tick_source == TickSource.TIMER and c.timer_running:
                     tick = self._emit_tick(c)
-                    c.time = (c.time + 1) & 0xFFFF
                 elif c.tick_source == TickSource.PIN_EDGE:
                     tick = self._emit_tick(c)
+                # TIME_* counts every cycle while the timer is armed (RTL
+                # tick_timer), including pin-edge — ticks still come from the pin.
+                if c.timer_running:
+                    c.time = (c.time + 1) & 0xFFFF
             ticks.append(tick)
 
         for ci, c in enumerate(self.ctx):

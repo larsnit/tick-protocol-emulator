@@ -1,7 +1,7 @@
 """External change at cycle M: IN / IN.T / XFER sample / every pin event kind see it together.
 
 Spec (docs/isa.md): M+2 through the same 2-flop sync; +1 when the glitch filter is on.
-Harness feeds uio_in the same way as ISS phys_ext (one ALIGN for pad outputs only).
+Harness feeds uio_in the same way as ISS phys_ext (pads sampled after observed RUN rise).
 """
 
 from __future__ import annotations
@@ -29,10 +29,11 @@ from tick.isa import (
     encode_xfer,
     Spr,
 )
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
 # Pad outputs are registered one cycle behind ISS drive; inputs share one timeline.
-ALIGN = 1
 EXPECT_NO_GLITCH = 2
 EXPECT_GLITCH = 3
 
@@ -118,13 +119,15 @@ async def _rtl_first_seen(dut, glitch: bool, rise: bool = False) -> dict[str, in
         settle, new = 1, 0
     cfg = {"per": 8.0, "dout_lp": 2, "din_lp": 0, "pins": pins, "events": events}
     img = assemble("hang: JMP AL, hang\n")
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
     core = dut.user_project.core
-    dut.ui_in.value = 1 << 3
     ext = (settle & 1) | (1 << 1)
+    dut.uio_in.value = ext
+    await start_run(host, dut)
     for _ in range(8):
         dut.uio_in.value = ext
         await RisingEdge(dut.clk)
@@ -159,7 +162,7 @@ def _assert_match(dut, iss: dict, rtl: dict, expect: int):
         assert rtl[k] == expect, f"RTL {k}={rtl[k]} expected {expect} (ISS={iss[k]})"
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def external_input_latency_matches_spec_no_glitch(dut):
     """Fall at M: lp_in and all pin event kinds visible at M+2 in ISS and RTL."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -168,7 +171,7 @@ async def external_input_latency_matches_spec_no_glitch(dut):
     _assert_match(dut, iss, rtl, EXPECT_NO_GLITCH)
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def external_input_latency_matches_spec_with_glitch(dut):
     """Fall at M with glitch filter: all consumers at M+3 in ISS and RTL."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -177,7 +180,7 @@ async def external_input_latency_matches_spec_with_glitch(dut):
     _assert_match(dut, iss, rtl, EXPECT_GLITCH)
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def external_rise_events_same_latency(dut):
     """Rise consumers share the same M+2 path."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -197,24 +200,26 @@ async def _lockstep_marker(dut, img, cfg, change_at: int, n: int = 48) -> tuple[
         if cy >= change_at and m.phys_oe[2] and m.phys_drive[2] and iss_mark is None:
             iss_mark = (m.cycle - 1) - change_at
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    dut.uio_in.value = 1
+    await start_run(host, dut)
     rtl_mark = None
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = 0 if cy >= change_at else 1
         await RisingEdge(dut.clk)
         oe = int(dut.uio_oe.value)
         out = int(dut.uio_out.value)
-        if cy >= change_at + ALIGN and (oe & 4) and (out & 4) and rtl_mark is None:
-            rtl_mark = (cy - ALIGN) - change_at
+        if cy >= change_at and (oe & 4) and (out & 4) and rtl_mark is None:
+            rtl_mark = (cy) - change_at
     assert iss_mark is not None and rtl_mark is not None, (iss_mark, rtl_mark)
     return iss_mark, rtl_mark
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def in_int_xfer_sample_same_latency_as_events(dut):
     """IN, IN.T, and XFER-in see the pin on the same M+2 schedule (marker lockstep)."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -279,5 +284,5 @@ async def in_int_xfer_sample_same_latency_as_events(dut):
     )
     dut._log.info(f"XFER marker ISS=M+{iss_d} RTL=M+{rtl_d}")
     # Sample path is M+2 (shared with events); marker is after XFER+MFS+ALU+JMP
-    # so absolute delay is larger. ISS/RTL may differ by ALIGN on the pad.
+    # so absolute delay is larger. Pad sample is after observed RUN rise.
     assert abs(iss_d - rtl_d) <= 1, (iss_d, rtl_d)

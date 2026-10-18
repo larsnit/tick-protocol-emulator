@@ -6,15 +6,23 @@
 module tick_core (
     input  wire        clk,
     input  wire        rst_n,
+    input  wire        soft_rst,       // pulse: clear exec state; keep IMEM+cfg
     input  wire        imem_we,
     input  wire [5:0]  imem_waddr,
     input  wire [15:0] imem_wdata,
+    input  wire        imem_hreq,      // host wants shared fetch port (IMEM_READ)
+    input  wire [5:0]  imem_hraddr,
+    output wire [15:0] imem_hrdata,
     input  wire        host_wr,
     input  wire [9:0]  host_wdata,
     output wire        host_full,
     input  wire        host_rd,
-    output reg  [9:0]  host_rdata,
+    output wire [9:0]  host_rdata,     // combinational peek of RX FIFO head
     output wire        host_empty,
+    output wire [3:0]  host_tx_count,  // host→program occupancy
+    output wire [3:0]  host_rx_count,  // program→host occupancy
+    output wire        enable0,
+    output wire        err_any,        // sticky ERR register non-zero
     input  wire        run,
     input  wire        cfg_we,
     input  wire        cfg_re,
@@ -38,42 +46,42 @@ module tick_core (
 
   wire       tx_full, tx_empty, rx_full, rx_empty;
   wire [9:0] tx_rdata, rx_rdata_c;
+  wire [3:0] tx_count, rx_count;
   wire       tx_rd, rx_wr;
   wire [9:0] rx_wdata;
 
+  // Soft reset clears FIFOs / issue / queue / events / timer; keeps IMEM + cfg.
+  wire exec_rst_n = rst_n & ~soft_rst;
+
   host_fifo #(.DEPTH(8), .WIDTH(10)) u_tx (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .wr(host_wr),
       .wdata(host_wdata),
       .full(tx_full),
       .rd(tx_rd),
       .rdata(tx_rdata),
-      .empty(tx_empty)
+      .empty(tx_empty),
+      .count(tx_count)
   );
 
   host_fifo #(.DEPTH(8), .WIDTH(10)) u_rx (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .wr(rx_wr),
       .wdata(rx_wdata),
       .full(rx_full),
       .rd(host_rd),
       .rdata(rx_rdata_c),
-      .empty(rx_empty)
+      .empty(rx_empty),
+      .count(rx_count)
   );
 
-  always @(posedge clk or negedge rst_n) begin
-    if (!rst_n)
-      host_rdata <= 10'h0;
-    else
-      host_rdata <= rx_rdata_c;
-  end
-
-  assign host_full  = tx_full;
-  assign host_empty = rx_empty;
-
-  wire        enable0;
+  assign host_rdata    = rx_rdata_c;
+  assign host_full     = tx_full;
+  assign host_empty    = rx_empty;
+  assign host_tx_count = tx_count;
+  assign host_rx_count = rx_count;
   wire [2:0]  pinmap0, pinmap1, pinmap2, pinmap3;
   wire [1:0]  pinmode0, pinmode1, pinmode2, pinmode3;
   wire [3:0]  pinidle;
@@ -186,7 +194,7 @@ module tick_core (
 
   tick_timer u_timer (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .run(internal_run),
       .start(t_start),
       .stop(t_stop),
@@ -216,8 +224,8 @@ module tick_core (
   reg run_q_sync;
   wire run_rise_sync = internal_run & ~run_q_sync;
 
-  always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
+  always @(posedge clk or negedge exec_rst_n) begin
+    if (!exec_rst_n) begin
       own_d      <= 8'hFF;
       sync0      <= 8'hFF;
       sync1      <= 8'hFF;
@@ -314,8 +322,8 @@ module tick_core (
   wire        tick_eff = tick_raw & ~event_trap_req;
   wire        trap_cancel = event_trap_req;
   reg         tick_obs_q;
-  always @(posedge clk or negedge rst_n) begin
-    if (!rst_n)
+  always @(posedge clk or negedge exec_rst_n) begin
+    if (!exec_rst_n)
       tick_obs_q <= 1'b0;
     else
       tick_obs_q <= internal_run ? tick_eff : 1'b0;
@@ -323,7 +331,7 @@ module tick_core (
 
   tick_events u_events (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .run(internal_run),
       .lp_in(lp_in),
       .lp_snap(lp_snap),
@@ -350,7 +358,7 @@ module tick_core (
 
   tick_queue u_queue (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .run(internal_run),
       .tick(tick_eff),
       .timer_run(timer_run),
@@ -429,6 +437,10 @@ module tick_core (
   // On trap, ISS redirects PC then issues the vector insn in the same cycle.
   wire [5:0] fetch_pc = event_trap_req ? event_trap_vec
                       : (miss_trap_req ? miss_vec : pc);
+  // Host IMEM_READ shares the fetch mux; only legal while ctx0 disabled
+  // (internal_run = run & enable0 is then 0, so issue is idle).
+  wire        host_imem_sel = imem_hreq & ~enable0;
+  wire [5:0]  imem_raddr    = host_imem_sel ? imem_hraddr : fetch_pc;
 
   tick_imem u_imem (
       .clk(clk),
@@ -436,13 +448,17 @@ module tick_core (
       .we(imem_we),
       .waddr(imem_waddr),
       .wdata(imem_wdata),
-      .raddr(fetch_pc),
+      .raddr(imem_raddr),
       .rdata(instr)
   );
+  // Always forward the selected read port (do not zero when hreq is low —
+  // host_spi samples LO in the same cycle it re-asserts hreq after the
+  // default clear, so gating here returned 0 for every LO byte).
+  assign imem_hrdata = instr;
 
   tick_issue u_issue (
       .clk(clk),
-      .rst_n(rst_n),
+      .rst_n(exec_rst_n),
       .run(run),
       .ctx_enable(enable0),
       .instr(instr),
@@ -520,6 +536,7 @@ module tick_core (
       .pending_clear_mask(pending_clear_mask)
   );
 
+  assign err_any       = |err_bits | miss;
   assign dbg_pc        = pc;
   assign dbg_waiting   = waiting;
   assign dbg_miss      = miss;

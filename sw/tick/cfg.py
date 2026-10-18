@@ -8,6 +8,21 @@ from .isa import MissPolicy, PinMode, TickSource
 
 # Shared
 ADDR_ENABLE = 0x00
+ADDR_CTRL = 0x01
+ADDR_TX_FREE = 0x02
+ADDR_RX_COUNT = 0x03
+ADDR_LINKERR = 0x04
+ADDR_ID = 0x05
+
+CTRL_RUN = 1 << 0
+CTRL_SOFT_RESET = 1 << 1
+CTRL_IRQ_EN_RX = 1 << 2
+CTRL_IRQ_EN_ERR = 1 << 3
+
+LINKERR_BADCMD = 1 << 0
+LINKERR_OVERFLOW = 1 << 1
+LINKERR_IMEM_REJECTED = 1 << 2
+LINKERR_ABORTED = 1 << 3
 
 # Context block bases
 CTX0_BASE = 0x10

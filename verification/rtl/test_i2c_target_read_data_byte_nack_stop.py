@@ -19,9 +19,9 @@ sys.path.insert(0, str(ROOT / "verification" / "model"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 
 
 def _cfg():
@@ -75,7 +75,7 @@ async def i2c_target_read_data_byte_nack_stop(dut):
     )
 
     cfg = _cfg()
-    host = [0xC3 | 0x100]
+    host_words = [0xC3 | 0x100]
     img = assemble((ROOT / "sw" / "programs" / "i2c_target.asm").read_text())
 
     # ISS checker
@@ -161,19 +161,21 @@ async def i2c_target_read_data_byte_nack_stop(dut):
     step_rec(_SCL_PHASE)
     step_rec(16)
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    await push_host(dut, 0xC3, last=True)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    await host.push(0xC3, last=True)
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(host, dut)
 
     rtl_out: list[tuple[int, int]] = []
-    for cy in range(len(ext) + ALIGN):
+    for cy in range(len(ext)):
         e = ext[min(cy, len(ext) - 1)]
         dut.uio_in.value = e
         await RisingEdge(dut.clk)
-        rtl_out.append((int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF))
+        rtl_out.append(rtl_pads(dut))
 
     m3 = Machine()
     m3.load(img, [cfg])
@@ -190,7 +192,7 @@ async def i2c_target_read_data_byte_nack_stop(dut):
             iss_oe = 1 if m3.phys_oe[0] else 0
             iss_out = m3.phys_drive[0] & 1
             iss_bits.append(_sda_host(iss_oe, iss_out, ext_sda))
-            out, oe = rtl_out[src + ALIGN]
+            out, oe = rtl_out[src]
             rtl_bits.append(_sda_host(oe, out, ext_sda))
         prev = scl
 

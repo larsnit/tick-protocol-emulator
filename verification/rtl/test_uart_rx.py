@@ -14,7 +14,7 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, PinMode, TickSource, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
 
 PER = 8
 
@@ -43,19 +43,13 @@ def _frame_levels(byte: int, per: int, *, stop: int = 1) -> list[int]:
     return levels
 
 
-async def _pop_rx(dut) -> int | None:
-    """Pop one core→host word (10-bit). Sample FIFO comb head, then pulse host_rd."""
-    core = dut.user_project.core
-    if int(core.host_empty.value):
+async def _pop_rx(host: HostLink) -> int | None:
+    """Pop one core→host word (10-bit) via HostLink."""
+    got = await host.pull()
+    if got is None:
         return None
-    # Combinational head (host_rdata is a registered copy and can lag one cycle).
-    val = int(core.u_rx.rdata.value) & 0x3FF
-    v = int(dut.ui_in.value)
-    dut.ui_in.value = v | (1 << 1)
-    await RisingEdge(dut.clk)
-    dut.ui_in.value = v & ~(1 << 1)
-    await RisingEdge(dut.clk)
-    return val
+    tag, data = got
+    return (data & 0xFF) | ((tag & 3) << 8)
 
 
 def _iss_word(w) -> int:
@@ -86,11 +80,12 @@ async def uart_rx_normal_and_back_to_back(dut):
             break
         iss_got.append(_iss_word(w))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    await host.run()
     for lv in levels:
         dut.uio_in.value = lv & 1
         await RisingEdge(dut.clk)
@@ -100,7 +95,7 @@ async def uart_rx_normal_and_back_to_back(dut):
 
     rtl_got = []
     for _ in range(8):
-        w = await _pop_rx(dut)
+        w = await _pop_rx(host)
         if w is None:
             break
         rtl_got.append(w)
@@ -129,11 +124,12 @@ async def uart_rx_framing_error(dut):
             break
         iss_got.append(_iss_word(w))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    await host.run()
     for lv in levels:
         dut.uio_in.value = lv & 1
         await RisingEdge(dut.clk)
@@ -143,7 +139,7 @@ async def uart_rx_framing_error(dut):
 
     rtl_got = []
     for _ in range(4):
-        w = await _pop_rx(dut)
+        w = await _pop_rx(host)
         if w is None:
             break
         rtl_got.append(w)
@@ -168,12 +164,13 @@ async def uart_rx_glitch_shorter_than_half_bit(dut):
         m.step()
     assert m.host_pop() is None
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    await host.run()
     for lv in levels:
         dut.uio_in.value = lv & 1
         await RisingEdge(dut.clk)
-    assert await _pop_rx(dut) is None
+    assert await _pop_rx(host) is None

@@ -18,10 +18,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import UO_RUN_LEAD_CYCLES, start_run
 
 from test_spi_i2c_milestones import (
-    ALIGN,
     CLK_NS,
     _SPI_PERIOD_CANDIDATES,
     _miso_pad,
@@ -56,20 +56,22 @@ async def spi_target_miso_sclk_to_change_delay(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
     img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
     cfg = _spi_max_cfg(cpol=False, cpha=False)
-    host = [0xAA, 0x55 | 0x100]
+    host_words = [0xAA, 0x55 | 0x100]
 
     delays_ns: list[float] = []
     margins_ns: list[float] = []  # MISO change → next host sample (rise)
 
     for phase_i in range(_N_PHASES):
         phase_ns = phase_i * (CLK_NS / _N_PHASES)
-        await reset_dut(dut)
-        await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-        await load_cfg_bytes(dut, {0x00: 0x01})
-        await load_program(dut, img)
-        for hw in host:
-            await push_host(dut, hw & 0xFF, last=bool(hw & 0x100))
-        dut.ui_in.value = 1 << 3
+        hl = HostLink(dut)
+        await hl.reset()
+        await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+        await hl.cfg_write_map({0x00: 0x01})
+        await hl.load_program(img)
+        for hw in host_words:
+            await hl.push(hw & 0xFF, last=bool(hw & 0x100))
+        dut.uio_in.value = ((1 & 1) << 3)  # CS high before RUN
+        await start_run(hl, dut)
 
         # Align to a clk edge, then offset SCLK by phase_ns within the period.
         await RisingEdge(dut.clk)
@@ -139,7 +141,12 @@ async def spi_target_miso_sclk_to_change_delay(dut):
 async def _sample_miso_at_rises(
     dut, img, cfg, *, period_clk: float, host: list[int], phase_clk: int = 1
 ) -> list[int]:
-    """Host-sample MISO at each SCLK rise (no pin lockstep). Returns packed bytes."""
+    """Host-sample MISO at each SCLK rise (no pin lockstep). Returns packed bytes.
+
+    SCLK (via uio) is driven mid-cycle so the sample never shares the chip's
+    MISO-update clk edge.
+    """
+    host_words = list(host)
     ext, rise_idx = _spi_max_ext(
         period_clk=period_clk,
         cpol=False,
@@ -147,19 +154,24 @@ async def _sample_miso_at_rises(
         mosi_bytes=_ALT_MOSI,
         phase_clk=phase_clk,
     )
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    for hw in host:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100))
-    dut.ui_in.value = 1 << 3
+    hl = HostLink(dut)
+    await hl.reset()
+    await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await hl.cfg_write_map({0x00: 0x01})
+    await hl.load_program(img)
+    for hw in host_words:
+        await hl.push(hw & 0xFF, last=bool(hw & 0x100))
+    dut.uio_in.value = ((1 & 1) << 3)  # CS high before RUN
+    await start_run(hl, dut)
+    half_ns = CLK_NS / 2.0
     bits: list[int] = []
-    for cy in range(len(ext) + ALIGN):
+    align = UO_RUN_LEAD_CYCLES
+    for cy in range(len(ext) + align):
         e = ext[min(cy, len(ext) - 1)]
-        dut.uio_in.value = e
         await RisingEdge(dut.clk)
-        src = cy - ALIGN
+        await Timer(half_ns, unit="ns")
+        dut.uio_in.value = e
+        src = cy - align
         if src in rise_idx and len(bits) < 16:
             bits.append(_miso_pad(dut))
     out = []
@@ -177,7 +189,7 @@ async def spi_target_cpha0_pipelined_xfer_miso_aa_55(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
     img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
     cfg = _spi_max_cfg(cpol=False, cpha=False)
-    host = [0xAA, 0x55 | 0x100]
+    host_words = [0xAA, 0x55 | 0x100]
     got = await _spi_target_async_xfer(
         dut,
         img,
@@ -187,36 +199,10 @@ async def spi_target_cpha0_pipelined_xfer_miso_aa_55(dut):
         cpha=False,
         mosi_bytes=_ALT_MOSI,
         expect_miso=_ALT_MISO,
-        host=host,
+        host=host_words,
         phase_clk=1,
     )
     assert got == _ALT_MISO, got
-
-
-@cocotb.test()
-async def spi_target_period4_zero_delay_race(dut):
-    """Period 4 'passes' only because host samples on the same clk edge MISO updates.
-
-    Half-period = 2 clk; measured fall→MISO is ~3 clk, so a real host sampling at
-    the rise (2 clk after fall) would see the prior bit. Zero-delay RTL sim samples
-    MISO after NBA on that shared clk edge and can see the new bit — not a valid
-    timing result.
-    """
-    cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
-    img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
-    cfg = _spi_max_cfg(cpol=False, cpha=False)
-    host = [0xAA, 0x55 | 0x100]
-
-    # Zero-delay sim may still pack expect_miso correctly at period 4.
-    got = await _sample_miso_at_rises(
-        dut, img, cfg, period_clk=4.0, host=host, phase_clk=1
-    )
-    dut._log.info(
-        f"PERIOD4_ZERO_DELAY_RACE got={got} want={_ALT_MISO} "
-        f"(sim may match; half=2 clk < fall→MISO≈3 clk — not a guaranteed pass)"
-    )
-    # Document: do not treat this as a timing pass. Guaranteed floor is period 8.
-    assert True
 
 
 @cocotb.test()
@@ -225,13 +211,13 @@ async def spi_target_miso_negative_short_period_bit_error(dut):
     cocotb.start_soon(Clock(dut.clk, CLK_NS, unit="ns").start())
     img = assemble((ROOT / "sw" / "programs" / "spi_target.asm").read_text())
     cfg = _spi_max_cfg(cpol=False, cpha=False)
-    host = [0xAA, 0x55 | 0x100]
+    host_words = [0xAA, 0x55 | 0x100]
 
     periods = list(_SPI_PERIOD_CANDIDATES) + [4.0, 3.5, 3.0, 2.5, 2.0]
     periods = sorted(set(periods), reverse=True)
 
     best_mosi = None
-    best_both_sim = None  # zero-delay sim floor (may be optimistic)
+    best_both_sim = None  # mid-cycle host sample floor
     first_fail_period = None
     first_fail_got = None
 
@@ -246,7 +232,7 @@ async def spi_target_miso_negative_short_period_bit_error(dut):
                 cpha=False,
                 mosi_bytes=_ALT_MOSI,
                 expect_miso=None,
-                host=host,
+                host=host_words,
                 phase_clk=1,
             )
             best_mosi = period
@@ -263,7 +249,7 @@ async def spi_target_miso_negative_short_period_bit_error(dut):
                 cpha=False,
                 mosi_bytes=_ALT_MOSI,
                 expect_miso=_ALT_MISO,
-                host=host,
+                host=host_words,
                 phase_clk=1,
             )
             best_both_sim = period
@@ -271,7 +257,7 @@ async def spi_target_miso_negative_short_period_bit_error(dut):
             pass
 
         got = await _sample_miso_at_rises(
-            dut, img, cfg, period_clk=period, host=host, phase_clk=1
+            dut, img, cfg, period_clk=period, host=host_words, phase_clk=1
         )
         if got != _ALT_MISO and first_fail_period is None:
             first_fail_period = period
@@ -286,7 +272,7 @@ async def spi_target_miso_negative_short_period_bit_error(dut):
     guaranteed = 8.0
     dut._log.info(
         f"SPI_MISO_LIMITS MOSI-only_sim period={best_mosi} → {50.0 / best_mosi:.2f} MHz; "
-        f"MOSI+MISO_sim_zero_delay period={best_both_sim} → {50.0 / best_both_sim:.2f} MHz; "
+        f"MOSI+MISO_sim period={best_both_sim} → {50.0 / best_both_sim:.2f} MHz; "
         f"MOSI+MISO_guaranteed period={guaranteed} → {50.0 / guaranteed:.2f} MHz; "
         f"first_MISO_bit_error period={first_fail_period} got={first_fail_got}"
     )

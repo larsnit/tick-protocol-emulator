@@ -23,11 +23,11 @@ From the repo root (after `pip install -e .`):
 3. Formal: `make formal` (SymbiYosys)
 4. ISS fuzzer: included in `make test-model`
 
-Load path when `RUN=0`: command nibbles on `ui[7:4]` with data on `uio[7:0]`
-(`0xA` addr, `0xB`/`0xC` imem lo/hi, `0xD`/`0xE` host word, pulse `IMEM_WE` /
-`HOST_WR`). Set `RUN=1` to execute. Protocol pin is `uio[0]`.
+Host link: SPI mode 0 on `ui[0]=SCLK`, `ui[1]=MOSI`, `ui[2]=CS_n`; `uo[0]=MISO`,
+`uo[1]=IRQ`, `uo[2]=RUN`. All eight `uio` pins are protocol-only. Load programs
+and config through SPI (`CTRL.RUN` starts execution). See [isa.md](isa.md) Host link.
 
 ## External hardware
 
-Host MCU or FPGA driving the parallel load bus (SPI-target shim planned on
-`ui`/`uo`) and a UART/SPI/I2C peer on the `uio` pins.
+Host MCU (e.g. RP2040 on the Tiny Tapeout demo board) as SPI controller, and a
+UART/SPI/I2C peer on the `uio` pins.

@@ -22,9 +22,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import JmpCond, encode_jmp, encode_set
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 
 # 0: SET.T LP0=1  → starts timer; commits on tick 0
 # 1: spin
@@ -95,21 +96,20 @@ async def _lockstep_phase(dut, phase: int) -> None:
         f"ISS PHASE={phase}: commit delta {commit2 - post2} want {expect_delta}"
     )
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     core = dut.user_project.core
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = 0
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         io, ie, ipc, irun = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
         rrun = int(core.dbg_timer_run.value)
         assert ie == re and (io & ie) == (ro & re), (
@@ -125,13 +125,13 @@ async def _lockstep_phase(dut, phase: int) -> None:
             )
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def trap_then_sett_restarts_timer_phase0(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await _lockstep_phase(dut, 0)
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def trap_then_sett_restarts_timer_phase2(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     await _lockstep_phase(dut, 2)

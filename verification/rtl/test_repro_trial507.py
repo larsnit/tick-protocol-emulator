@@ -15,7 +15,9 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import decode
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
 IMG = [int(x, 0) for x in [
     '0x4401', '0x350c', '0x4000', '0x3514', '0x4001', '0x5020', '0x5220', '0x5420',
@@ -38,7 +40,6 @@ CFG = {
 HOST = [0x326, 0xd7, 0x2cc, 0x2d6, 0x250, 0x23f, 0x2d5, 0x28f]
 # Truncated EXT from log — regenerate full length below if needed
 EXT0 = [47, 11, 14, 50, 94, 157, 57, 150, 131, 149, 218, 60, 63, 153, 149, 187]
-ALIGN = 1
 N_CYC = 360
 
 
@@ -63,7 +64,7 @@ def _iss_dump(ext):
     return tr
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def repro_trial507(dut):
     # Rebuild same RNG stream as fuzz trial 507 for EXT — use log EXT prefix + zeros.
     # Full EXT was printed in the log; parse from env file if present.
@@ -80,32 +81,34 @@ async def repro_trial507(dut):
 
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     iss = _iss_dump(ext)
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(host, dut)
     rtl = []
     q = dut.user_project.core.u_queue
-    for cy in range(N_CYC + ALIGN):
+    for cy in range(N_CYC):
         dut.uio_in.value = ext[min(cy, len(ext) - 1)]
         await RisingEdge(dut.clk)
         out = int(dut.uio_out.value) & 0xFF
         oe = int(dut.uio_oe.value) & 0xFF
         rtl.append((out, oe))
-        if ALIGN <= cy < N_CYC + ALIGN:
+        if cy < N_CYC:
             def gv(n):
                 try:
                     return int(getattr(q, n).value)
                 except Exception:
                     return -1
             pc = int(dut.user_project.core.u_issue.pc_q.value)
-            # After rtl cycle cy, compare to ISS PC after cycle (cy-ALIGN):
+            # After rtl cycle cy, compare to ISS PC after cycle (cy):
             # iss[] stores pre-step PC; post-step PC is ctx after that step ≈ next
             # entry's pre-PC when not the last, else decode from regs dump.
-            iss_i = cy - ALIGN
+            iss_i = cy
             iss_post_pc = iss[iss_i + 1][2] if iss_i + 1 < len(iss) else iss[iss_i][2]
             if pc != iss_post_pc:
                 print(
@@ -117,7 +120,7 @@ async def repro_trial507(dut):
                     pass
     for i in range(N_CYC):
         io, ie, pc, w, regs, dv, ov, tm = iss[i]
-        ro, re = rtl[i + ALIGN]
+        ro, re = rtl[i]
         if ie != re or (io & ie) != (ro & re):
             print(
                 f"MISMATCH cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x}) "

@@ -15,9 +15,11 @@ sys.path.insert(0, str(ROOT / "verification" / "model"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import UO_RUN_LEAD_CYCLES, start_run, rtl_pads
 
-ALIGN = 1
+ALIGN = UO_RUN_LEAD_CYCLES
+
 CLK_NS = 20.0  # 50 MHz
 
 # Non-integer SCLK periods (in clk cycles). SCLK is driven by Timer, not clk edges.
@@ -129,10 +131,20 @@ def _pin_pair(m: Machine):
     return out, oe
 
 
-async def _lockstep_ext(dut, img, cfg, ext, host=(), *, check=True):
+async def _lockstep_ext(dut, img, cfg, ext, host=(), *, check=True, align: int | None = None):
+    """Offline ISS vs RTL registered pads.
+
+    ``align`` (default ``ALIGN``) shifts the pad compare: ISS cycle i ↔ RTL
+    cycle i+align. Timer-driven controller tests often need ``align=0`` (drive
+    already stable in the registered pads on the execute edge); pin-edge target
+    tests need the default pad lag.
+    """
+    if align is None:
+        align = ALIGN
+    host_words = host
     m = Machine()
     m.load(img, [cfg])
-    for hw in host:
+    for hw in host_words:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
     iss = []
     for cy in range(len(ext)):
@@ -140,21 +152,23 @@ async def _lockstep_ext(dut, img, cfg, ext, host=(), *, check=True):
         m.step()
         iss.append(_pin_pair(m))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    for hw in host:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+    hl = HostLink(dut)
+    await hl.reset()
+    await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await hl.cfg_write_map({0x00: 0x01})
+    await hl.load_program(img)
+    for hw in host_words:
+        await hl.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(hl, dut)
     rtl = []
-    for cy in range(len(ext) + ALIGN):
+    for cy in range(len(ext) + align):
         dut.uio_in.value = ext[min(cy, len(ext) - 1)]
         await RisingEdge(dut.clk)
-        rtl.append((int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF))
+        rtl.append(rtl_pads(dut))
     if check:
         for i, (io, ie) in enumerate(iss):
-            ro, re = rtl[i + ALIGN]
+            ro, re = rtl[i + align]
             assert ie == re and (io & ie) == (ro & re), (
                 f"cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"
             )
@@ -299,13 +313,13 @@ async def i2c_target_read_ack_nack_stop_lockstep(dut):
     )
 
     cfg = _i2c_target_cfg()
-    host = [0xC3 | 0x100]
+    host_words = [0xC3 | 0x100]
     img = assemble((ROOT / "sw" / "programs" / "i2c_target.asm").read_text())
 
     # --- ISS checker ---
     m2 = Machine()
     m2.load(img, [cfg])
-    for hw in host:
+    for hw in host_words:
         m2.host_push(hw & 0xFF, last=bool(hw & 0x100))
     i2c_idle(m2, 8)
     i2c_start(m2)
@@ -325,7 +339,7 @@ async def i2c_target_read_ack_nack_stop_lockstep(dut):
     # --- Record ext from ISS for RTL replay ---
     m = Machine()
     m.load(img, [cfg])
-    for hw in host:
+    for hw in host_words:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100))
     ext: list[int] = []
 
@@ -397,25 +411,27 @@ async def i2c_target_read_ack_nack_stop_lockstep(dut):
 
     # --- RTL host-sample at SCL rises ---
     rtl_out: list[tuple[int, int]] = []
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    for hw in host:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100))
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    for hw in host_words:
+        await host.push(hw & 0xFF, last=bool(hw & 0x100))
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(host, dut)
     for cy in range(len(ext) + ALIGN):
         e = ext[min(cy, len(ext) - 1)]
         dut.uio_in.value = e
         await RisingEdge(dut.clk)
-        rtl_out.append((int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF))
+        rtl_out.append(rtl_pads(dut))
 
     def _sda_host(oe: int, out: int, ext_sda: int) -> int:
         return 0 if ((oe & 1) and not (out & 1)) else (ext_sda & 1)
 
     m3 = Machine()
     m3.load(img, [cfg])
-    for hw in host:
+    for hw in host_words:
         m3.host_push(hw & 0xFF, last=bool(hw & 0x100))
     iss_bits: list[int] = []
     rtl_bits: list[int] = []
@@ -555,7 +571,7 @@ async def i2c_controller_write_byte_lockstep(dut):
     # SDA low always so every ACK samples 0 (NACK path not taken).
     n = 200
     ext = [0x00] * n  # SDA=0, SCL=0 external pull favors ACK
-    await _lockstep_ext(dut, img, cfg, ext, host=[0x50, 0xA5 | 0x100])
+    await _lockstep_ext(dut, img, cfg, ext, host=[0x50, 0xA5 | 0x100], align=0)
 
 
 @cocotb.test()
@@ -570,7 +586,7 @@ async def spi_controller_modes_lockstep(dut):
             n = 80
             idle_clk = 0x04 if cpol else 0x00
             ext = [(idle_clk | 0x02)] * n  # MISO=1, CS driven by DUT
-            await _lockstep_ext(dut, img, cfg, ext, host=[0xA5 | 0x100])
+            await _lockstep_ext(dut, img, cfg, ext, host=[0xA5 | 0x100], align=0)
 
 
 @cocotb.test()
@@ -587,7 +603,7 @@ async def spi_controller_max_sclk(dut):
         n = 80
         ext = [0x02] * n
         try:
-            await _lockstep_ext(dut, img, cfg, ext, host=[0x3C | 0x100])
+            await _lockstep_ext(dut, img, cfg, ext, host=[0x3C | 0x100], align=0)
             best = per
             break
         except AssertionError as e:
@@ -606,17 +622,12 @@ def _miso_pad(dut) -> int:
     return 1
 
 
-async def _pop_host_rx(dut) -> int | None:
-    core = dut.user_project.core
-    if int(core.host_empty.value):
+async def _pop_host_rx(host: HostLink) -> int | None:
+    got = await host.pull()
+    if got is None:
         return None
-    val = int(core.u_rx.rdata.value) & 0x3FF
-    v = int(dut.ui_in.value)
-    dut.ui_in.value = v | (1 << 1)
-    await RisingEdge(dut.clk)
-    dut.ui_in.value = v & ~(1 << 1)
-    await RisingEdge(dut.clk)
-    return val
+    tag, data = got
+    return (data & 0xFF) | ((tag & 3) << 8)
 
 
 def _spi_half_lens(period_clk: float, n_halves: int) -> list[int]:
@@ -702,6 +713,7 @@ async def _spi_target_async_xfer(
     MOSI-only: ISS↔RTL pin lockstep (target must track MOSI/SCLK).
     MOSI+MISO: also require host-sampled MISO bytes == expect_miso.
     """
+    host_words = list(host)
     ext, rise_idx = _spi_max_ext(
         period_clk=period_clk,
         cpol=cpol,
@@ -713,7 +725,7 @@ async def _spi_target_async_xfer(
     # ISS must receive the MOSI payload (proves the ext is a valid receive path).
     m = Machine()
     m.load(img, [cfg])
-    for hw in host:
+    for hw in host_words:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
     iss_miso_bits: list[int] = []
     for cy, e in enumerate(ext):
@@ -735,25 +747,33 @@ async def _spi_target_async_xfer(
     )
 
     # Pin lockstep = MOSI receive path on RTL.
-    await _lockstep_ext(dut, img, cfg, ext, host=host)
+    await _lockstep_ext(dut, img, cfg, ext, host=host_words)
 
     if expect_miso is None:
         return []
 
     # Re-run for host-style MISO sample at each SCLK rising edge.
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    for hw in host:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+    # Sample MISO with a Timer offset so we never race the chip's clk-edge
+    # update (host model must not sample on the same edge the DUT changes it).
+    hl = HostLink(dut)
+    await hl.reset()
+    await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await hl.cfg_write_map({0x00: 0x01})
+    await hl.load_program(img)
+    for hw in host_words:
+        await hl.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(hl, dut)
 
+    # Drive SCLK mid-cycle (sub-cycle offset from clk) so the host sample
+    # never shares the chip's MISO-update clk edge.
+    half_ns = CLK_NS / 2.0
     rtl_miso_bits: list[int] = []
     for cy in range(len(ext) + ALIGN):
         e = ext[min(cy, len(ext) - 1)]
-        dut.uio_in.value = e
         await RisingEdge(dut.clk)
+        await Timer(half_ns, unit="ns")
+        dut.uio_in.value = e
         src = cy - ALIGN
         if src in rise_idx and len(rtl_miso_bits) < 8 * len(mosi_bytes):
             rtl_miso_bits.append(_miso_pad(dut))

@@ -20,9 +20,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 
 # WAIT tick (tc=none → timer keeps running) → MISS trap to SET.T.E on OD idle-high.
 IMG = [
@@ -60,7 +61,7 @@ CFG = {
 }
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def set_e_after_miss_od_idle_high_stays_released(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     m = Machine()
@@ -86,21 +87,20 @@ async def set_e_after_miss_od_idle_high_stays_released(dut):
             )
     assert post_miss_set_e, "never saw post-miss SET.E commit"
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
+    dut.uio_in.value = 0xFF
+    await start_run(host, dut)
     core = dut.user_project.core
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = 0xFF
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         io, ie, ipc = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
         assert ie == re and (io & ie) == (ro & re), (
             f"cy={i} ISS=({io:#04x},{ie:#04x}) pc={ipc} "

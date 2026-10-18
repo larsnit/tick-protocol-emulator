@@ -37,7 +37,8 @@ from tick.isa import (
     encode_wait,
     encode_xfer,
 )
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import rtl_run_pad_trace, start_run
 
 DEFAULT_SEED = 0xB22D_F2B2
 ENV_SEED = "TICK_RTL_FUZZ_SEED"
@@ -47,7 +48,6 @@ N_PROG = 50
 N_WORDS = 40
 N_CYC = 80
 
-ALIGN = 1
 HOST_PRELOAD = 8
 
 MODE_NAMES = {
@@ -344,9 +344,12 @@ def gen_program(rng: random.Random, cfg: dict, n: int = N_WORDS, slot: int = 0) 
         elif pick == 5:
             words.append(encode_in(True, rng.randrange(4)))
         elif pick == 6:
-            words.append(encode_wait(WaitTc.NONE, 1 << 4))  # tick
+            # TICK + rearm/idle is illegal (docs §2 rule 6c).
+            tc = rng.choice([WaitTc.NONE, WaitTc.STOP])
+            words.append(encode_wait(tc, 1 << 4))  # tick
         elif pick == 7:
-            words.append(encode_wait(WaitTc.NONE, 1 << 0))  # host data (EV0 soft)
+            tc = rng.choice([WaitTc.NONE, WaitTc.IDLE, WaitTc.STOP, WaitTc.REARM])
+            words.append(encode_wait(tc, 1 << 0))  # host data (EV0 soft)
         elif pick == 8:
             words.append(encode_ldi(rng.randrange(4), rng.randrange(256)))
         elif pick == 9:
@@ -486,6 +489,73 @@ def _record_exec(cov: dict, w: int, taken: bool | None) -> None:
             cov["mts"][name] += 1
 
 
+def _iss_cov_step(m: Machine, cov: dict, prev_pending: int) -> int:
+    """One ISS step with coverage accounting; returns updated prev_pending."""
+    c = m.ctx[0]
+    old_pc = c.pc
+    was_waiting = c.waiting
+    was_pull = c.pull_block is not None
+    was_mfs = c.mfs_rx is not None
+    was_full = c.timed_active is not None and c.timed_pending is not None
+    was_run = not was_waiting and not was_pull and not was_mfs
+    abs_pc = c.base + c.pc
+    peek_w = m.imem[abs_pc] if abs_pc < len(m.imem) else None
+    live_before = [m._event_active(c, ei) for ei in range(4)]
+    m.step()
+    c2 = m.ctx[0]
+    for ei, e in enumerate(c2.events):
+        if live_before[ei] or (c2.evf & (1 << ei)):
+            if c2.evf & (1 << ei) or (c2.evf and live_before[ei]):
+                cov["ev_kind_fired"][e.kind.name] += 1
+    if (prev_pending & ~c2.ev_pending) and (c2.evf & 0xF):
+        cov["ev_latched_consumed"] += 1
+    if peek_w is not None and ((peek_w >> 12) & 0xF) == Op.MTS:
+        if ((peek_w >> 6) & 0xF) == Spr.EVCLR and (prev_pending & ~c2.ev_pending):
+            cov["evclr_clears"] += 1
+    if c2.pc != old_pc and c2.pc != ((old_pc + 1) & 0x3F):
+        for ei, e in enumerate(c2.events):
+            if e.trap and c2.pc == (e.vector & 0x3F) and (c2.evf & (1 << ei)):
+                cov["trap_cause"][f"EV{ei}"] += 1
+                if was_pull:
+                    cov["trap_state"]["pull"] += 1
+                elif was_mfs:
+                    cov["trap_state"]["mfs"] += 1
+                elif was_waiting:
+                    cov["trap_state"]["wait"] += 1
+                elif was_full:
+                    cov["trap_state"]["queue_full"] += 1
+                elif was_run:
+                    cov["trap_state"]["running"] += 1
+                n_live_trap = sum(
+                    1
+                    for ej, ee in enumerate(c2.events)
+                    if ee.trap and live_before[ej]
+                )
+                if n_live_trap >= 2:
+                    cov["same_cycle_trap_prio"] += 1
+                break
+        else:
+            if c2.miss_policy == MissPolicy.TRAP and c2.pc == (c2.miss_vector & 0x3F):
+                cov["trap_cause"]["MISS"] += 1
+    if c2.miss:
+        cov["miss_policy"][c2.miss_policy.name] += 1
+    issued = c.enabled and peek_w is not None and (
+        not was_waiting or not m.ctx[0].waiting
+    )
+    if was_waiting and m.ctx[0].waiting:
+        issued = False
+    if issued:
+        d = decode(peek_w)
+        taken = None
+        if d["op"] == Op.JMP:
+            nxt = (old_pc + 1) & 0x3F
+            taken = m.ctx[0].pc != nxt
+            if d["cond"] == JmpCond.AL and (peek_w >> 2) & 0x3F == nxt:
+                taken = True
+        _record_exec(cov, peek_w, taken)
+    return c2.ev_pending
+
+
 def iss_pin_trace_cov(
     img: list[int], cfg: dict, n_cyc: int, ext: list[int], host_words: list[int], cov: dict
 ) -> list[tuple[int, int]]:
@@ -496,78 +566,14 @@ def iss_pin_trace_cov(
     m.load(img, [cfg])
     for hw in host_words:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    # Warmup: SPI snap+first-exec edge — count coverage, discard pads from trace.
+    if ext:
+        m.phys_ext = [(ext[0] >> p) & 1 for p in range(8)]
+    prev_pending = _iss_cov_step(m, cov, 0)
     trace = []
-    prev_pending = 0
     for cy in range(n_cyc):
-        c = m.ctx[0]
-        old_pc = c.pc
-        was_waiting = c.waiting
-        was_pull = c.pull_block is not None
-        was_mfs = c.mfs_rx is not None
-        was_full = c.timed_active is not None and c.timed_pending is not None
-        was_run = not was_waiting and not was_pull and not was_mfs
-        abs_pc = c.base + c.pc
-        peek_w = m.imem[abs_pc] if abs_pc < len(m.imem) else None
-        live_before = [m._event_active(c, ei) for ei in range(4)]
         m.phys_ext = [(ext[min(cy, len(ext) - 1)] >> p) & 1 for p in range(8)]
-        m.step()
-        c2 = m.ctx[0]
-        # Event-kind fired (live this cycle and observed in EVF or trap).
-        for ei, e in enumerate(c2.events):
-            if live_before[ei] or (c2.evf & (1 << ei)):
-                if c2.evf & (1 << ei) or (c2.evf and live_before[ei]):
-                    cov["ev_kind_fired"][e.kind.name] += 1
-        if (prev_pending & ~c2.ev_pending) and (c2.evf & 0xF):
-            cov["ev_latched_consumed"] += 1
-        if peek_w is not None and ((peek_w >> 12) & 0xF) == Op.MTS:
-            if ((peek_w >> 6) & 0xF) == Spr.EVCLR and (prev_pending & ~c2.ev_pending):
-                cov["evclr_clears"] += 1
-        # Trap taken: PC redirected to a configured vector this cycle.
-        if c2.pc != old_pc and c2.pc != ((old_pc + 1) & 0x3F):
-            for ei, e in enumerate(c2.events):
-                if e.trap and c2.pc == (e.vector & 0x3F) and (c2.evf & (1 << ei)):
-                    cov["trap_cause"][f"EV{ei}"] += 1
-                    if was_pull:
-                        cov["trap_state"]["pull"] += 1
-                    elif was_mfs:
-                        cov["trap_state"]["mfs"] += 1
-                    elif was_waiting:
-                        cov["trap_state"]["wait"] += 1
-                    elif was_full:
-                        cov["trap_state"]["queue_full"] += 1
-                    elif was_run:
-                        cov["trap_state"]["running"] += 1
-                    n_live_trap = sum(
-                        1
-                        for ej, ee in enumerate(c2.events)
-                        if ee.trap and live_before[ej]
-                    )
-                    if n_live_trap >= 2:
-                        cov["same_cycle_trap_prio"] += 1
-                    break
-            else:
-                if c2.miss_policy == MissPolicy.TRAP and c2.pc == (c2.miss_vector & 0x3F):
-                    cov["trap_cause"]["MISS"] += 1
-        if c2.miss:
-            cov["miss_policy"][c2.miss_policy.name] += 1
-        prev_pending = c2.ev_pending
-        # Count instructions that actually issue: either we were not waiting, or a
-        # wait/PULL/MFS completed this cycle and _exec ran (isa.md §3.1 same-cycle).
-        issued = c.enabled and peek_w is not None and (
-            not was_waiting or not m.ctx[0].waiting
-        )
-        # Still waiting after step ⇒ no issue (blocked the whole cycle).
-        if was_waiting and m.ctx[0].waiting:
-            issued = False
-        if issued:
-            d = decode(peek_w)
-            taken = None
-            if d["op"] == Op.JMP:
-                nxt = (old_pc + 1) & 0x3F
-                taken = m.ctx[0].pc != nxt
-                if d["cond"] == JmpCond.AL and (peek_w >> 2) & 0x3F == nxt:
-                    taken = True
-            _record_exec(cov, peek_w, taken)
+        prev_pending = _iss_cov_step(m, cov, prev_pending)
         out = 0
         oe = 0
         for p in range(8):
@@ -708,7 +714,7 @@ async def iss_rtl_random_lockstep(dut):
                 host_words = [rng.randrange(0x400) for _ in range(HOST_PRELOAD)]
                 host_words[0] = (host_words[0] & 0xFF) | 0x300
                 host_words[1] = host_words[1] & 0xFF
-            ext = [rng.randrange(256) for _ in range(n_cyc + ALIGN + 2)]
+            ext = [rng.randrange(256) for _ in range(n_cyc + 2)]
             dout_lp = int(cfg["dout_lp"]) & 3
             dout_phys = int(cfg["pins"][dout_lp]["physical"]) & 7
             for i in range(len(ext)):
@@ -735,27 +741,20 @@ async def iss_rtl_random_lockstep(dut):
             iss_trace = iss_pin_trace_cov(img, cfg, n_cyc, ext, host_words, cov)
 
             cfg_bytes = dict_to_bytes(0, cfg, enable_mask=None)
-            await reset_dut(dut)
-            await load_cfg_bytes(dut, cfg_bytes)
-            await load_cfg_bytes(dut, {0x00: 0x01})
-            await load_program(dut, img)
+            host = HostLink(dut)
+            await host.reset()
+            await host.cfg_write_map(cfg_bytes)
+            await host.cfg_write_map({0x00: 0x01})
+            await host.load_program(img)
             for hw in host_words:
-                await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-            dut.ui_in.value = 1 << 3
-            dut.uio_in.value = ext[0]
-
-            rtl_trace = []
-            for cy in range(n_cyc + ALIGN):
-                dut.uio_in.value = ext[min(cy, len(ext) - 1)]
-                await RisingEdge(dut.clk)
-                out = int(dut.uio_out.value) & 0xFF
-                oe = int(dut.uio_oe.value) & 0xFF
-                rtl_trace.append((out, oe))
+                await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+            dut.uio_in.value = ext[0] if ext else 0
+            rtl_trace = await rtl_run_pad_trace(dut, host, n_cyc, ext)
 
             bad_cy = None
             for i in range(n_cyc):
                 i_out, i_oe = iss_trace[i]
-                r_out, r_oe = rtl_trace[i + ALIGN]
+                r_out, r_oe = rtl_trace[i]
                 if i_oe != r_oe or (i_out & i_oe) != (r_out & r_oe):
                     bad_cy = i
                     dut._log.info(
@@ -775,31 +774,26 @@ async def iss_rtl_random_lockstep(dut):
                         "ext0": ext[: bad_cy + 4],
                         "host": host_words,
                         "iss": iss_trace[bad_cy],
-                        "rtl": rtl_trace[bad_cy + ALIGN],
+                        "rtl": rtl_trace[bad_cy],
                     }
 
         # Directed event/trap/MISS probes (deterministic; fill rare coverage buckets).
         async def _probe_lockstep(img, cfg, n_cyc, ext, host=None, *, check=False):
-            host = host or []
-            iss_trace = iss_pin_trace_cov(img, cfg, n_cyc, ext, host, cov)
-            await reset_dut(dut)
-            await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-            await load_cfg_bytes(dut, {0x00: 0x01})
-            await load_program(dut, img)
-            for hw in host:
-                await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-            dut.ui_in.value = 1 << 3
-            rtl_trace = []
-            for cy in range(n_cyc + ALIGN):
-                dut.uio_in.value = ext[min(cy, len(ext) - 1)]
-                await RisingEdge(dut.clk)
-                rtl_trace.append(
-                    (int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF)
-                )
+            host_words = host or []
+            iss_trace = iss_pin_trace_cov(img, cfg, n_cyc, ext, host_words, cov)
+            hl = HostLink(dut)
+            await hl.reset()
+            await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+            await hl.cfg_write_map({0x00: 0x01})
+            await hl.load_program(img)
+            for hw in host_words:
+                await hl.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+            dut.uio_in.value = ext[0] if ext else 0
+            rtl_trace = await rtl_run_pad_trace(dut, hl, n_cyc, ext)
             if check:
                 for i in range(n_cyc):
                     io, ie = iss_trace[i]
-                    ro, re = rtl_trace[i + ALIGN]
+                    ro, re = rtl_trace[i]
                     if ie != re or (io & ie) != (ro & re):
                         raise AssertionError(
                             f"probe mismatch cy={i} ISS=({io:#04x},{ie:#04x}) "
@@ -1037,27 +1031,22 @@ async def iss_rtl_random_lockstep(dut):
         for p in probe_cfg["pins"]:
             cov["pin_mode"][MODE_NAMES[p["mode"]]] += 1
         probe_host = [0x300]
-        probe_ext = [0] * (32 + ALIGN + 2)
+        probe_ext = [0] * (32 + 2)
         for n in range(1, 17):
             img = [encode_xfer(0, n, XferMode.IN), encode_jmp(JmpCond.AL, 1)]
             iss_trace = iss_pin_trace_cov(img, probe_cfg, 8, probe_ext, probe_host, cov)
-            await reset_dut(dut)
-            await load_cfg_bytes(dut, dict_to_bytes(0, probe_cfg, enable_mask=None))
-            await load_cfg_bytes(dut, {0x00: 0x01})
-            await load_program(dut, img)
+            host = HostLink(dut)
+            await host.reset()
+            await host.cfg_write_map(dict_to_bytes(0, probe_cfg, enable_mask=None))
+            await host.cfg_write_map({0x00: 0x01})
+            await host.load_program(img)
             for hw in probe_host:
-                await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-            dut.ui_in.value = 1 << 3
-            rtl_trace = []
-            for cy in range(8 + ALIGN):
-                dut.uio_in.value = 0
-                await RisingEdge(dut.clk)
-                rtl_trace.append(
-                    (int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF)
-                )
+                await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+            dut.uio_in.value = probe_ext[0]
+            rtl_trace = await rtl_run_pad_trace(dut, host, 8, probe_ext)
             for i in range(8):
                 io, ie = iss_trace[i]
-                ro, re = rtl_trace[i + ALIGN]
+                ro, re = rtl_trace[i]
                 if ie != re or (io & ie) != (ro & re):
                     mismatches += 1
                     if first_bad is None:
@@ -1070,32 +1059,27 @@ async def iss_rtl_random_lockstep(dut):
                             "ext0": probe_ext[: i + 4],
                             "host": probe_host,
                             "iss": iss_trace[i],
-                            "rtl": rtl_trace[i + ALIGN],
+                            "rtl": rtl_trace[i],
                         }
                     break
         for n in range(1, 9):
             for mode in (XferMode.OUT, XferMode.BOTH):
                 img = [encode_xfer(0, n, mode), encode_jmp(JmpCond.AL, 1)]
                 iss_trace = iss_pin_trace_cov(img, probe_cfg, 8, probe_ext, probe_host, cov)
-                await reset_dut(dut)
-                await load_cfg_bytes(dut, dict_to_bytes(0, probe_cfg, enable_mask=None))
-                await load_cfg_bytes(dut, {0x00: 0x01})
-                await load_program(dut, img)
+                host = HostLink(dut)
+                await host.reset()
+                await host.cfg_write_map(dict_to_bytes(0, probe_cfg, enable_mask=None))
+                await host.cfg_write_map({0x00: 0x01})
+                await host.load_program(img)
                 for hw in probe_host:
-                    await push_host(
-                        dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200)
+                    await host.push(
+                        hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200)
                     )
-                dut.ui_in.value = 1 << 3
-                rtl_trace = []
-                for cy in range(8 + ALIGN):
-                    dut.uio_in.value = 0
-                    await RisingEdge(dut.clk)
-                    rtl_trace.append(
-                        (int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF)
-                    )
+                dut.uio_in.value = probe_ext[0]
+                rtl_trace = await rtl_run_pad_trace(dut, host, 8, probe_ext)
                 for i in range(8):
                     io, ie = iss_trace[i]
-                    ro, re = rtl_trace[i + ALIGN]
+                    ro, re = rtl_trace[i]
                     if ie != re or (io & ie) != (ro & re):
                         mismatches += 1
                         if first_bad is None:
@@ -1108,7 +1092,7 @@ async def iss_rtl_random_lockstep(dut):
                                 "ext0": probe_ext[: i + 4],
                                 "host": probe_host,
                                 "iss": iss_trace[i],
-                                "rtl": rtl_trace[i + ALIGN],
+                                "rtl": rtl_trace[i],
                             }
                         break
 

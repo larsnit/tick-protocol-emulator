@@ -14,6 +14,7 @@ SRC_SV := \
 	$(REPO)/src/tick_queue.sv \
 	$(REPO)/src/tick_issue.sv \
 	$(REPO)/src/tick_core.sv \
+	$(REPO)/src/host_spi.sv \
 	$(REPO)/src/tt_um_larsnitschke_tick.sv
 
 .PHONY: help test test-model test-rtl test-gl formal synth lint clean
@@ -53,7 +54,7 @@ test-gl:
 	cd $(REPO)/verification/rtl && $(MAKE) GATES=yes
 
 formal:
-	cd $(REPO)/verification/formal && sby -f tick.sby
+	cd $(REPO)/verification/formal && sby -f tick.sby && sby -f host_link.sby
 
 synth:
 	@mkdir -p $(REPO)/synth

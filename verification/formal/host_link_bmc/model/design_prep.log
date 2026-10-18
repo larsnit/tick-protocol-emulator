@@ -1,0 +1,143 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+
+-- Executing script file `design_prep.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design.il
+
+2. Executing SCC pass (detecting logic loops).
+Found 0 SCCs in module host_link_formal_top.
+Found 0 SCCs in module host_spi.
+Found 0 SCCs.
+
+3. Executing SIMPLEMAP pass (map simple cells to gate primitives).
+
+4. Executing MEMORY_NORDFF pass (extracting $dff cells from memories).
+
+5. Executing ASYNC2SYNC pass.
+Replacing host_spi.$procdff$1591 ($adff): ARST=\rst_n, D=$0\cfg_we[0:0], Q=\cfg_we
+Replacing host_spi.$procdff$1596 ($adff): ARST=\rst_n, D=$0\cfg_re[0:0], Q=\cfg_re
+Replacing host_spi.$procdff$1601 ($adff): ARST=\rst_n, D=$0\cfg_addr[7:0], Q=\cfg_addr
+Replacing host_spi.$procdff$1606 ($adff): ARST=\rst_n, D=$0\cfg_wdata[7:0], Q=\cfg_wdata
+Replacing host_spi.$procdff$1611 ($adff): ARST=\rst_n, D=$0\imem_we[0:0], Q=\imem_we
+Replacing host_spi.$procdff$1616 ($adff): ARST=\rst_n, D=$0\imem_hreq[0:0], Q=\imem_hreq
+Replacing host_spi.$procdff$1621 ($adff): ARST=\rst_n, D=$0\imem_waddr[5:0], Q=\imem_waddr
+Replacing host_spi.$procdff$1626 ($adff): ARST=\rst_n, D=$0\imem_hraddr[5:0], Q=\imem_hraddr
+Replacing host_spi.$procdff$1631 ($adff): ARST=\rst_n, D=$0\imem_wdata[15:0], Q=\imem_wdata
+Replacing host_spi.$procdff$1636 ($adff): ARST=\rst_n, D=$0\host_wr[0:0], Q=\host_wr
+Replacing host_spi.$procdff$1641 ($adff): ARST=\rst_n, D=$0\host_rd[0:0], Q=\host_rd
+Replacing host_spi.$procdff$1646 ($adff): ARST=\rst_n, D=$0\host_wdata[9:0], Q=\host_wdata
+Replacing host_spi.$procdff$1651 ($adff): ARST=\rst_n, D=$0\miso_o[0:0], Q=\miso_o
+Replacing host_spi.$procdff$1656 ($adff): ARST=\rst_n, D=$0\soft_rst_o[0:0], Q=\soft_rst_o
+Replacing host_spi.$procdff$1661 ($adff): ARST=\rst_n, D=$0\run_q[0:0], Q=\run_q
+Replacing host_spi.$procdff$1666 ($adff): ARST=\rst_n, D=$0\irq_en_rx[0:0], Q=\irq_en_rx
+Replacing host_spi.$procdff$1671 ($adff): ARST=\rst_n, D=$0\irq_en_err[0:0], Q=\irq_en_err
+Replacing host_spi.$procdff$1676 ($adff): ARST=\rst_n, D=$0\linkerr_q[3:0], Q=\linkerr_q
+Replacing host_spi.$procdff$1681 ($adff): ARST=\rst_n, D=$0\state[2:0], Q=\state
+Replacing host_spi.$procdff$1686 ($adff): ARST=\rst_n, D=$0\bit_cnt[2:0], Q=\bit_cnt
+Replacing host_spi.$procdff$1691 ($adff): ARST=\rst_n, D=$0\rx_sr[7:0], Q=\rx_sr
+Replacing host_spi.$procdff$1696 ($adff): ARST=\rst_n, D=$0\tx_sr[7:0], Q=\tx_sr
+Replacing host_spi.$procdff$1701 ($adff): ARST=\rst_n, D=$0\cmd_q[7:0], Q=\cmd_q
+Replacing host_spi.$procdff$1706 ($adff): ARST=\rst_n, D=$0\addr_q[7:0], Q=\addr_q
+Replacing host_spi.$procdff$1711 ($adff): ARST=\rst_n, D=$0\push_cmd[0:0], Q=\push_cmd
+Replacing host_spi.$procdff$1716 ($adff): ARST=\rst_n, D=$0\push_last_en[0:0], Q=\push_last_en
+Replacing host_spi.$procdff$1721 ($adff): ARST=\rst_n, D=$0\hold_valid[0:0], Q=\hold_valid
+Replacing host_spi.$procdff$1726 ($adff): ARST=\rst_n, D=$0\hold_data[7:0], Q=\hold_data
+Replacing host_spi.$procdff$1731 ($adff): ARST=\rst_n, D=$0\imem_hi_phase[0:0], Q=\imem_hi_phase
+Replacing host_spi.$procdff$1736 ($adff): ARST=\rst_n, D=$0\imem_hi_byte[7:0], Q=\imem_hi_byte
+Replacing host_spi.$procdff$1741 ($adff): ARST=\rst_n, D=$0\pull_want_data[0:0], Q=\pull_want_data
+Replacing host_spi.$procdff$1746 ($adff): ARST=\rst_n, D=$0\pull_armed[0:0], Q=\pull_armed
+Replacing host_spi.$procdff$1751 ($adff): ARST=\rst_n, D=$0\pull_valid_l[0:0], Q=\pull_valid_l
+Replacing host_spi.$procdff$1756 ($adff): ARST=\rst_n, D=$0\pull_data_l[7:0], Q=\pull_data_l
+Replacing host_spi.$procdff$1761 ($adff): ARST=\rst_n, D=$0\unit_open[0:0], Q=\unit_open
+Replacing host_spi.$procdff$1766 ($adff): ARST=\rst_n, D=$0\shared_rd[0:0], Q=\shared_rd
+Replacing host_spi.$procdff$1771 ($adff): ARST=\rst_n, D=$0\shared_buf[7:0], Q=\shared_buf
+Replacing host_spi.$procdff$1776 ($adff): ARST=\rst_n, D=$0\cfg_re[0:0], Q=\cfg_re_pend
+Replacing host_spi.$procdff$1781 ($adff): ARST=\rst_n, D=$0\cfg_re_pend2[0:0], Q=\cfg_re_pend2
+Replacing host_spi.$procdff$1786 ($adff): ARST=\rst_n, D=$0\cfg_cap[7:0], Q=\cfg_cap
+Replacing host_spi.$procdff$1791 ($adff): ARST=\rst_n, D=$0\load_tx_next[0:0], Q=\load_tx_next
+Replacing host_spi.$procdff$1796 ($adff): ARST=\rst_n, D=$0\tx_next[7:0], Q=\tx_next
+Replacing host_spi.$procdff$1801 ($adff): ARST=\rst_n, D=$0\imem_hi_reload[0:0], Q=\imem_hi_reload
+Replacing host_spi.$procdff$1806 ($adff): ARST=\rst_n, D=$0\imem_rd_active[0:0], Q=\imem_rd_active
+Replacing host_spi.$procdff$1811 ($adff): ARST=\rst_n, D=$0\ctrl_pend[0:0], Q=\ctrl_pend
+Replacing host_spi.$procdff$1816 ($adff): ARST=\rst_n, D=$0\ctrl_pend_val[3:0], Q=\ctrl_pend_val
+Replacing host_spi.$procdff$1821 ($adff): ARST=\rst_n, D=$0\skip_next_fall[0:0], Q=\skip_next_fall
+Replacing host_spi.$procdff$1826 ($adff): ARST=\rst_n, D=$0\f_push_dropped_q[0:0], Q=\f_push_dropped_q
+Replacing host_spi.$procdff$1831 ($adff): ARST=\rst_n, D=$0\f_w1c_overflow_q[0:0], Q=\f_w1c_overflow_q
+Replacing host_spi.$procdff$1836 ($adff): ARST=\rst_n, D={ \sclk_s [0] \sclk_i }, Q=\sclk_s
+Replacing host_spi.$procdff$1841 ($adff): ARST=\rst_n, D={ \mosi_s [0] \mosi_i }, Q=\mosi_s
+Replacing host_spi.$procdff$1846 ($adff): ARST=\rst_n, D={ \cs_s [0] \cs_n_i }, Q=\cs_s
+Replacing host_spi.$procdff$1851 ($adff): ARST=\rst_n, D=\sclk_s [1], Q=\sclk_d
+Replacing host_spi.$procdff$1856 ($adff): ARST=\rst_n, D=\cs_s [1], Q=\cs_d
+
+6. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \host_link_formal_top..
+Finding unused cells or wires in module \host_spi..
+Removed 23 unused cells and 23 unused wires.
+<suppressed ~24 debug messages>
+
+7. Executing FORMALFF pass.
+
+8. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \host_link_formal_top..
+Finding unused cells or wires in module \host_spi..
+Removed 2 unused cells and 2 unused wires.
+<suppressed ~4 debug messages>
+
+9. Executing CHECK pass (checking for obvious problems).
+Checking module host_link_formal_top...
+Checking module host_spi...
+Found and reported 0 problems.
+
+10. Executing SETUNDEF pass (replace undef values with defined constants).
+
+11. Executing OPT pass (performing simple optimizations).
+
+11.1. Executing OPT_EXPR pass (perform const folding).
+Optimizing module host_link_formal_top.
+<suppressed ~1 debug messages>
+Optimizing module host_spi.
+
+11.2. Executing OPT_MERGE pass (detect identical cells).
+Finding identical cells in module `\host_link_formal_top'.
+Computing hashes of 51 cells of `\host_link_formal_top'.
+Finding duplicate cells in `\host_link_formal_top'.
+Computing hashes of 49 cells of `\host_link_formal_top'.
+Finding duplicate cells in `\host_link_formal_top'.
+<suppressed ~6 debug messages>
+Finding identical cells in module `\host_spi'.
+Computing hashes of 740 cells of `\host_spi'.
+Finding duplicate cells in `\host_spi'.
+Computing hashes of 739 cells of `\host_spi'.
+Finding duplicate cells in `\host_spi'.
+<suppressed ~3 debug messages>
+Removed a total of 3 cells.
+
+11.3. Executing OPT_DFF pass (perform DFF optimizations).
+
+11.4. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \host_link_formal_top..
+Finding unused cells or wires in module \host_spi..
+Removed 0 unused cells and 4 unused wires.
+<suppressed ~2 debug messages>
+
+11.5. Finished fast OPT passes.
+
+12. Executing OPT_CLEAN pass (remove unused cells and wires).
+Finding unused cells or wires in module \host_link_formal_top..
+Finding unused cells or wires in module \host_spi..
+Removed 0 unused cells and 59 unused wires.
+<suppressed ~2 debug messages>
+
+13. Executing RTLIL backend.
+Output filename: ../model/design_prep.il
+
+End of script. Logfile hash: 264cbb8b8f, time: 0.02s, user: 0.03s, system: 0.00s, MEM: 20.59 MB peak
+Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+Time spent: 38% 4x opt_clean (0 sec), 9% 1x check (0 sec), ...

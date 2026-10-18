@@ -1,0 +1,15 @@
+[options]
+mode prove
+depth 25
+
+[engines]
+smtbmc z3
+
+[script]
+read -sv host_spi.sv
+read -sv host_link_formal_top.sv
+prep -top host_link_formal_top
+
+[files]
+../../src/host_spi.sv
+host_link_formal_top.sv

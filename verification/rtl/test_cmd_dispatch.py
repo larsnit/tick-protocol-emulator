@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, PinMode, TickSource, assemble
-from rtl_bus import load_default_cfg, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
 # From cmd_dispatch.asm layout
 PC_H_ADD = 4
@@ -39,48 +40,40 @@ def _cfg():
     }
 
 
-async def _pop_host(dut) -> int | None:
-    """Pulse host_rd; return data byte if FIFO had data (uo status host_empty bit)."""
-    # uo while run: {0, pin0, tick, miss, waiting, host_empty, host_full, host_rdata[0]}
-    uo = int(dut.uo_out.value)
-    if (uo >> 2) & 1:  # host_empty
+async def _pop_host(host: HostLink) -> int | None:
+    """Pop via HostLink; return 0 if data present (presence-only; ISS checks values)."""
+    got = await host.pull()
+    if got is None:
         return None
-    # Sample low bit before pop; full byte needs host_rdata — use ISS for data check.
-    v = int(dut.ui_in.value)
-    dut.ui_in.value = v | (1 << 1)
-    await RisingEdge(dut.clk)
-    dut.ui_in.value = v & ~(1 << 1)
-    await RisingEdge(dut.clk)
-    return 0  # presence only; data compared via ISS lockstep
+    return 0
 
 
 @cocotb.test()
 async def cmd_dispatch_ping_and_add(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset_dut(dut)
+    host = HostLink(dut)
+    await host.reset()
     cfg = _cfg()
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     words = assemble((ROOT / "sw" / "programs" / "cmd_dispatch.asm").read_text())
-    await load_program(dut, words)
+    await host.load_program(words)
 
     iss = Machine()
     iss.load(words, [cfg])
 
     # Host: ping command, then add 3+5
-    await push_host(dut, PC_H_PING)
+    await host.push(PC_H_PING)
     iss.host_push(PC_H_PING)
-    await push_host(dut, PC_H_ADD)
+    await host.push(PC_H_ADD)
     iss.host_push(PC_H_ADD)
-    await push_host(dut, 3)
+    await host.push(3)
     iss.host_push(3)
-    await push_host(dut, 5)
+    await host.push(5)
     iss.host_push(5)
 
-    dut.ui_in.value = 1 << 3
+    dut.uio_in.value = 0
+    await start_run(host, dut, iss)
     saw_ping = False
-    ALIGN = 1
-    for _ in range(ALIGN):
-        await RisingEdge(dut.clk)
 
     for cy in range(80):
         await RisingEdge(dut.clk)
@@ -110,23 +103,22 @@ async def cmd_dispatch_ping_and_add(dut):
 @cocotb.test()
 async def cmd_dispatch_xfer(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset_dut(dut)
+    host = HostLink(dut)
+    await host.reset()
     cfg = _cfg()
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     words = assemble((ROOT / "sw" / "programs" / "cmd_dispatch.asm").read_text())
-    await load_program(dut, words)
+    await host.load_program(words)
 
     iss = Machine()
     iss.load(words, [cfg])
-    await push_host(dut, PC_H_XFER)
+    await host.push(PC_H_XFER)
     iss.host_push(PC_H_XFER)
-    await push_host(dut, 0xA5)
+    await host.push(0xA5)
     iss.host_push(0xA5)
 
-    dut.ui_in.value = 1 << 3
-    ALIGN = 1
-    for _ in range(ALIGN):
-        await RisingEdge(dut.clk)
+    dut.uio_in.value = 0
+    await start_run(host, dut, iss)
 
     mismatch = 0
     for cy in range(100):

@@ -1,7 +1,7 @@
 """External change at cycle M: IN / IN.T / XFER sample / every pin event kind see it together.
 
 Spec (docs/isa.md): M+2 through the same 2-flop sync; +1 when the glitch filter is on.
-Harness feeds uio_in the same way as ISS phys_ext (one ALIGN for pad outputs only).
+Harness feeds uio_in the same way as ISS phys_ext (pads sampled after observed RUN rise).
 """
 
 from __future__ import annotations
@@ -29,10 +29,13 @@ from tick.isa import (
     encode_xfer,
     Spr,
 )
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import UO_RUN_LEAD_CYCLES, rtl_pads, start_run
+from rtl_only import RTL_ONLY
 
 # Pad outputs are registered one cycle behind ISS drive; inputs share one timeline.
-ALIGN = 1
+# UO_RUN_LEAD_CYCLES (== tick-ref ALIGN) is that measured pad lag.
+ALIGN = UO_RUN_LEAD_CYCLES
 EXPECT_NO_GLITCH = 2
 EXPECT_GLITCH = 3
 
@@ -118,13 +121,18 @@ async def _rtl_first_seen(dut, glitch: bool, rise: bool = False) -> dict[str, in
         settle, new = 1, 0
     cfg = {"per": 8.0, "dout_lp": 2, "din_lp": 0, "pins": pins, "events": events}
     img = assemble("hang: JMP AL, hang\n")
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
     core = dut.user_project.core
-    dut.ui_in.value = 1 << 3
     ext = (settle & 1) | (1 << 1)
+    dut.uio_in.value = ext
+    await start_run(host, dut)
+    # Settle with pin levels held through rising edges. Change is applied and
+    # then counted on subsequent rising edges (same protocol as the ISS
+    # end-of-cycle capture model → M+2 / M+3 with glitch).
     for _ in range(8):
         dut.uio_in.value = ext
         await RisingEdge(dut.clk)
@@ -159,7 +167,7 @@ def _assert_match(dut, iss: dict, rtl: dict, expect: int):
         assert rtl[k] == expect, f"RTL {k}={rtl[k]} expected {expect} (ISS={iss[k]})"
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes lp_in / ev_live / ev_pending
 async def external_input_latency_matches_spec_no_glitch(dut):
     """Fall at M: lp_in and all pin event kinds visible at M+2 in ISS and RTL."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -168,7 +176,7 @@ async def external_input_latency_matches_spec_no_glitch(dut):
     _assert_match(dut, iss, rtl, EXPECT_NO_GLITCH)
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes lp_in / ev_live / ev_pending
 async def external_input_latency_matches_spec_with_glitch(dut):
     """Fall at M with glitch filter: all consumers at M+3 in ISS and RTL."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -177,7 +185,7 @@ async def external_input_latency_matches_spec_with_glitch(dut):
     _assert_match(dut, iss, rtl, EXPECT_GLITCH)
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes lp_in / ev_live / ev_pending
 async def external_rise_events_same_latency(dut):
     """Rise consumers share the same M+2 path."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -187,7 +195,14 @@ async def external_rise_events_same_latency(dut):
 
 
 async def _lockstep_marker(dut, img, cfg, change_at: int, n: int = 48) -> tuple[int, int]:
-    """Return (iss_delta, rtl_delta) from change_at to first lp2 marker high."""
+    """Return (iss_delta, rtl_delta) from change_at to first lp2 marker high.
+
+    Same protocol as tick-ref: offline ISS (end-of-cycle pin capture, no sample
+    refresh) vs registered RTL pads with ``ALIGN`` pad lag. Without the ISS
+    sample refresh used in some live harnesses, IN/IN.T markers are M+4; with
+    refresh they are also M+4 on combo pads but M+6 on registered pads if ALIGN
+    is omitted — see docs/isa.md.
+    """
     m = Machine()
     m.load(img, [cfg])
     iss_mark = None
@@ -197,19 +212,25 @@ async def _lockstep_marker(dut, img, cfg, change_at: int, n: int = 48) -> tuple[
         if cy >= change_at and m.phys_oe[2] and m.phys_drive[2] and iss_mark is None:
             iss_mark = (m.cycle - 1) - change_at
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    dut.uio_in.value = 1  # pre-RUN / pre-change level
+    await start_run(host, dut)
+    # Pin lead of 1: tick-ref counted change_at from the run-assert edge (a
+    # non-execute cycle on the parallel bus). SPI execute cycle 0 is already the
+    # first execute, so presenting the change one RTL cycle earlier restores the
+    # same sample phase vs offline ISS (measured; see docs/isa.md).
+    PIN_LEAD = 1
     rtl_mark = None
     for cy in range(n + ALIGN):
-        dut.uio_in.value = 0 if cy >= change_at else 1
+        dut.uio_in.value = 0 if (cy + PIN_LEAD) >= change_at else 1
         await RisingEdge(dut.clk)
-        oe = int(dut.uio_oe.value)
-        out = int(dut.uio_out.value)
-        if cy >= change_at + ALIGN and (oe & 4) and (out & 4) and rtl_mark is None:
-            rtl_mark = (cy - ALIGN) - change_at
+        out, oe = rtl_pads(dut)
+        if cy >= change_at + ALIGN - PIN_LEAD and (oe & 4) and (out & 4) and rtl_mark is None:
+            rtl_mark = (cy - ALIGN + PIN_LEAD) - change_at
     assert iss_mark is not None and rtl_mark is not None, (iss_mark, rtl_mark)
     return iss_mark, rtl_mark
 

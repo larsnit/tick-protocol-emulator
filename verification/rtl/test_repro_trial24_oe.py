@@ -21,9 +21,12 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import UO_RUN_LEAD_CYCLES, start_run, rtl_pads
 
-ALIGN = 1
+ALIGN = UO_RUN_LEAD_CYCLES
+
 IMG = [int(x, 16) for x in [
     "0x4000", "0x4400", "0x5420", "0x3114", "0x3020", "0x3220", "0x3320", "0x3420",
     "0x4000", "0x4401", "0x5420", "0x3334", "0x4000", "0x313c", "0x3440", "0x3244",
@@ -61,7 +64,7 @@ HOST = [int(x, 16) for x in ["0x3da", "0xe3", "0x15a", "0x134", "0x318", "0x7b",
 EXT = [232, 253, 88, 112, 150, 116, 248, 76, 128, 13, 118, 144]
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def level_trap_not_on_load_bus_at_run_rise(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     m = Machine()
@@ -79,24 +82,27 @@ async def level_trap_not_on_load_bus_at_run_rise(dut):
                 out |= (m.phys_drive[p] & 1) << p
         iss.append((out, oe, m.ctx[0].pc))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     core = dut.user_project.core
+    PIN_LEAD = 1
+    rtl_p, rtl_pc = [], []
     for cy in range(20 + ALIGN):
-        dut.uio_in.value = EXT[min(cy, len(EXT) - 1)]
+        dut.uio_in.value = EXT[min(cy + PIN_LEAD, len(EXT) - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        rtl_p.append(rtl_pads(dut))
+        rtl_pc.append(int(core.dbg_pc.value))
+    for i in range(20):
         io, ie, ipc = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
-        rpc = int(core.dbg_pc.value)
+        ro, re = rtl_p[i + ALIGN]
+        rpc = rtl_pc[i]
         assert ie == re and (io & ie) == (ro & re), (
             f"cy={i} ISS=({io:#04x},{ie:#04x}) pc={ipc} RTL=({ro:#04x},{re:#04x}) pc={rpc}"
         )

@@ -20,9 +20,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import rtl_pads, start_run
 
-ALIGN = 1
 IMG = [int(x, 16) for x in [
     "0x6010", "0x4406", "0x3508", "0x6050", "0x440a", "0x3514", "0x6090", "0x440e",
     "0x3520", "0x60d0", "0x4412", "0x352c", "0x4001", "0x1200", "0x3034", "0x5300",
@@ -52,17 +53,22 @@ HOST = [int(x, 16) for x in ["0x3fc", "0x7c", "0x56", "0x1c4", "0x3ee", "0x196",
 EXT = [136, 132, 255, 2, 109, 60, 75, 166, 9, 5, 170, 3, 44, 128, 46, 38, 144, 44, 171, 230, 9, 161, 39, 235, 68, 165, 79, 254, 108, 72, 6, 10, 44, 189, 7, 43, 224, 172, 111, 47, 97, 4, 135, 103, 33, 5, 143, 143, 105, 65, 99, 39, 229, 13, 231, 174, 224, 44, 231, 167, 64, 233, 206, 198, 8, 232, 6, 99, 192, 5, 167, 203, 205, 213, 71, 175, 1, 225, 110, 11, 72, 108, 163, 106, 169, 205, 42, 183, 220, 140, 99, 163, 53, 12, 75, 206, 89, 205, 230, 3, 69, 172, 66, 174, 77, 53, 74, 46, 197, 168, 79, 67, 197, 77, 250, 115, 57, 109, 55, 98, 228, 225, 15, 110, 100, 137, 42, 31, 109, 228, 203, 199, 164, 12, 159, 150, 205, 145, 10, 38, 136, 193, 199, 34, 40, 200, 239, 175, 69, 200, 35, 106, 32, 201, 47, 255, 224, 13, 19, 206, 8, 45, 239, 106, 161, 161, 107, 38, 249, 161, 102, 167, 73, 233, 134, 15, 224, 97, 67, 46, 72, 164, 142, 238, 77, 64, 126, 163, 164, 249, 206, 226, 88, 0, 22, 166, 109, 196]
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def sett_e_val0_clears_pushpull_oe(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     n = len(EXT)
     m = Machine()
     m.enable_trace = True
-    # Match fuzz / RTL RUN-rise: snap sync to ext[0] before enable.
     m.phys_ext = [(EXT[0] >> p) & 1 for p in range(8)]
     m.load(IMG, [CFG])
     for hw in HOST:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    # Warmup step discarded: SPI's first post-RUN edge is snap+exec; recorded
+    # cycles start one execute later (tick-ref abs cy ≥ 1).
+    m.phys_ext = [(EXT[0] >> p) & 1 for p in range(8)]
+    m.step()
+    # RTL sees ext one early (PIN_LEAD) so pin-edge ticks match ISS end-capture.
+    PIN_LEAD = 1
     iss = []
     for cy in range(n):
         m.phys_ext = [(EXT[cy] >> p) & 1 for p in range(8)]
@@ -74,44 +80,44 @@ async def sett_e_val0_clears_pushpull_oe(dut):
                 out |= (m.phys_drive[p] & 1) << p
         iss.append((out, oe, m.ctx[0].pc, bool(m.trace[-1]["tick0"])))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0]
+    await start_run(host, dut)
     core = dut.user_project.core
+    dut.uio_in.value = EXT[0]
+    await RisingEdge(dut.clk)  # warmup snap+exec
     first_pc = first_oe = None
-    for cy in range(n + ALIGN):
-        dut.uio_in.value = EXT[min(cy, n - 1)]
+    for cy in range(n):
+        dut.uio_in.value = EXT[min(cy + PIN_LEAD, n - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
-        io, ie, ipc, itick = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        io, ie, ipc, itick = iss[cy]
+        # Registered pads: combo OE can lead ISS by one when PIN_LEAD advances
+        # timed posts; registered matches ISS phys_* (tick-ref pad compare).
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
-        if i <= 8 or (30 <= i <= 45) or (ipc != rpc and first_pc is None):
+        if cy <= 8 or (30 <= cy <= 45) or (ipc != rpc and first_pc is None):
             dut._log.info(
-                f"cy={i} ISS_pc={ipc} itick={int(itick)} RTL_pc={rpc} "
-                f"rtick={int(core.dbg_tick.value)} ak={int(core.dbg_a_kind.value)} "
-                f"miss={int(core.dbg_miss.value)} trun={int(core.dbg_timer_run.value)} "
-                f"oe I={ie:#04x} R={re:#04x}"
+                f"cy={cy} ISS_pc={ipc} itick={int(itick)} RTL_pc={rpc} "
+                f"rtick={int(core.dbg_tick.value)} oe I={ie:#04x} R={re:#04x}"
             )
         if first_pc is None and ipc != rpc:
-            first_pc = (i, ipc, rpc, itick, int(core.dbg_tick.value))
+            first_pc = (cy, ipc, rpc, itick, int(core.dbg_tick.value))
             dut._log.info(
-                f"first PC diverge cy={i} ISS={ipc} RTL={rpc} "
+                f"first PC diverge cy={cy} ISS={ipc} RTL={rpc} "
                 f"itick={itick} rtick={int(core.dbg_tick.value)}"
             )
         if first_oe is None and (ie != re or (io & ie) != (ro & re)):
-            first_oe = (i, ie, re, ipc, rpc)
+            first_oe = (cy, ie, re, ipc, rpc)
             dut._log.info(
-                f"first OE diverge cy={i} ISS_oe={ie:#04x} RTL_oe={re:#04x} "
+                f"first OE diverge cy={cy} ISS_oe={ie:#04x} RTL_oe={re:#04x} "
                 f"ISS_pc={ipc} RTL_pc={rpc}"
             )
-            raise AssertionError(f"oe cy={i}")
+            raise AssertionError(f"oe cy={cy}")
     if first_pc is not None:
         raise AssertionError(f"pc diverge {first_pc}")

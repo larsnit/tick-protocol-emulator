@@ -14,9 +14,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 IMG = [int(x, 16) for x in [
     "0x6010", "0x4406", "0x3508", "0x6050", "0x440a", "0x3514", "0x6090", "0x440e",
     "0x3520", "0x60d0", "0x4412", "0x352c", "0x4001", "0x1200", "0x3034", "0x5300",
@@ -46,7 +47,7 @@ HOST = [int(x, 16) for x in ["0x3fc", "0x7c", "0x56", "0x1c4", "0x3ee", "0x196",
 EXT = [152, 148, 255, 18, 125, 60, 75, 166, 25, 5, 170, 19, 60, 144, 46, 54, 144, 44, 171, 246, 25, 161, 39, 235, 68, 165, 95, 254, 108, 72, 6, 10, 44, 189, 7, 43, 224, 172, 127, 47, 97, 4, 135, 119, 33, 5, 159, 143, 105, 81, 99, 39, 229, 13, 247, 174, 224, 44, 231, 183, 64, 233, 206, 214, 8, 232, 6, 99, 192, 5, 183, 219, 205, 213, 71, 191, 17, 225, 110, 11, 72, 124, 163, 106, 185, 205, 58, 183, 220, 140, 99, 163, 53, 12, 75, 206, 89, 205, 230, 3, 85, 172, 66, 174, 93, 53, 74, 62, 197, 168, 79, 67, 197, 77, 250, 115, 57, 125, 55, 114, 228, 241, 15, 110, 116, 153, 42, 31, 109, 244, 219, 199, 164, 12, 159, 150, 205, 145, 10, 54, 152, 209, 199, 34, 40, 200, 239, 175, 85, 216, 35, 122, 32, 201, 47, 255, 224, 13, 19, 222, 24, 61, 239, 106, 177, 161, 123, 38, 249, 161, 102, 183, 89, 233, 134, 15, 224, 97, 67, 62, 72, 164, 142, 238, 77, 64, 126, 163, 180, 249, 206, 242, 88, 0, 22, 166, 125, 196]
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def trial197_oe_lockstep(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     n = len(EXT)
@@ -68,24 +69,23 @@ async def trial197_oe_lockstep(dut):
             (out, oe, m.ctx[0].pc, m.ctx[0].drive_oe, bool(m.trace[-1]["tick0"]))
         )
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     core = dut.user_project.core
     q = core.u_queue
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = EXT[min(cy, n - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         io, ie, ipc, idoe, itick = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
         if i <= 10 or ipc != rpc or ie != re or (io & ie) != (ro & re):
             dut._log.info(

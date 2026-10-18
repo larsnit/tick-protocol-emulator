@@ -14,19 +14,15 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import Machine, PinMode, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import (
-    cfg_read,
-    load_cfg_bytes,
-    load_default_cfg,
-    load_program,
-    reset_dut,
-    set_cmd,
-)
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
 
 async def _start(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset_dut(dut)
+    host = HostLink(dut)
+    await host.reset()
+    return host
 
 
 def _iss_own_latency_ok() -> bool:
@@ -61,9 +57,8 @@ def _iss_own_latency_ok() -> bool:
 @cocotb.test()
 async def readback_latency_external_2(dut):
     """External pin change during cycle M is visible to IN in cycle M+2."""
-    await _start(dut)
-    await load_default_cfg(
-        dut,
+    host = await _start(dut)
+    await host.load_default_cfg(
         {
             "per": 8.0,
             "msb_first": False,
@@ -88,11 +83,11 @@ async def readback_latency_external_2(dut):
     saw1: SET lp1=1
     hang1: JMP AL, hang1
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0
-    dut.ui_in.value = 1 << 3
-    for _ in range(2):  # ALIGN + let sync see 0
-        await RisingEdge(dut.clk)
+    await start_run(host, dut)
+    # let sync see 0 one execute cycle before raising pin
+    await RisingEdge(dut.clk)
     dut.uio_in.value = 1  # rise at M; IN two instr later → M+2
     saw = False
     for _ in range(20):
@@ -107,9 +102,8 @@ async def readback_latency_external_2(dut):
 async def readback_latency_own_3(dut):
     """Own drive from SET in cycle N is first visible to IN in cycle N+3."""
     assert _iss_own_latency_ok(), "ISS reference for own latency broken"
-    await _start(dut)
-    await load_default_cfg(
-        dut,
+    host = await _start(dut)
+    await host.load_default_cfg(
         {
             "per": 8.0,
             "msb_first": False,
@@ -126,9 +120,9 @@ async def readback_latency_own_3(dut):
     bad: JMP AL, bad
     ok: JMP AL, ok
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0
-    dut.ui_in.value = 1 << 3
+    await start_run(host, dut)
     pin_trace = []
     for _ in range(20):
         await RisingEdge(dut.clk)
@@ -141,9 +135,8 @@ async def readback_latency_own_3(dut):
 
 @cocotb.test()
 async def opendrain_release_reads_1(dut):
-    await _start(dut)
-    await load_default_cfg(
-        dut,
+    host = await _start(dut)
+    await host.load_default_cfg(
         {
             "per": 8.0,
             "msb_first": False,
@@ -159,9 +152,9 @@ async def opendrain_release_reads_1(dut):
     bad: JMP AL, bad
     ok: JMP AL, ok
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 1
-    dut.ui_in.value = 1 << 3
+    await start_run(host, dut)
     for _ in range(16):
         await RisingEdge(dut.clk)
     assert (int(dut.uio_oe.value) & 1) == 0, "OD release must not drive"
@@ -169,11 +162,12 @@ async def opendrain_release_reads_1(dut):
 
 @cocotb.test()
 async def idle_reset_oe_off(dut):
-    await _start(dut)
+    host = await _start(dut)
     assert int(dut.uio_oe.value) == 0
-    await load_default_cfg(dut)
+    await host.load_default_cfg()
     assert int(dut.uio_oe.value) == 0
-    dut.ui_in.value = 1 << 3
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
     assert (int(dut.uio_oe.value) & 1) == 1
@@ -181,7 +175,7 @@ async def idle_reset_oe_off(dut):
 
 @cocotb.test()
 async def dual_map_err(dut):
-    await _start(dut)
+    host = await _start(dut)
     cfg = {
         "per": 8.0,
         "msb_first": False,
@@ -192,7 +186,7 @@ async def dual_map_err(dut):
             {"physical": 3, "mode": PinMode.INPUT, "idle": 1},
         ],
     }
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     # err_map_set is registered → sticky MAP one cycle later; burn 2 cycles.
     src = """
     LDI r0, 0
@@ -203,8 +197,9 @@ async def dual_map_err(dut):
     got: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     await RisingEdge(dut.clk)
     await RisingEdge(dut.clk)
     oe = int(dut.uio_oe.value)
@@ -221,7 +216,7 @@ async def dual_map_err(dut):
 
 @cocotb.test()
 async def config_readback_roundtrip(dut):
-    await _start(dut)
+    host = await _start(dut)
     blob = dict_to_bytes(
         0,
         {
@@ -231,22 +226,20 @@ async def config_readback_roundtrip(dut):
         },
         enable_mask=None,
     )
-    await load_cfg_bytes(dut, blob)
+    await host.cfg_write_map(blob)
     for addr, val in blob.items():
-        got = await cfg_read(dut, addr)
+        got = await host.cfg_read(addr)
         assert got == (val & 0xFF), (hex(addr), hex(got), hex(val))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    assert await cfg_read(dut, 0x00) == 0x01
+    await host.cfg_write_map({0x00: 0x01})
+    assert await host.cfg_read(0x00) == 0x01
 
 
 @cocotb.test()
 async def write_while_enabled_cfg_error(dut):
-    await _start(dut)
-    await load_default_cfg(dut)
-    await set_cmd(dut, 0x9, 0x12)
-    await set_cmd(dut, 0xF, 0x00)
-    await set_cmd(dut, 0x0, 0)
-    assert await cfg_read(dut, 0x12) == 0x01
+    host = await _start(dut)
+    await host.load_default_cfg()
+    await host.cfg_write(0x12, 0x00)  # while ENABLE: sticky ERR.CFG, write ignored
+    assert await host.cfg_read(0x12) == 0x01
     src = """
     MFS r0, ERR
     JMP NZ, got
@@ -254,8 +247,9 @@ async def write_while_enabled_cfg_error(dut):
     got: SET lp0=0
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     saw_low = False
     for _ in range(24):
         await RisingEdge(dut.clk)
@@ -268,7 +262,7 @@ async def write_while_enabled_cfg_error(dut):
 @cocotb.test()
 async def jmp_err_on_map(dut):
     """JMP ERR takes when ERR.MAP is set (pin-only; gate-level safe)."""
-    await _start(dut)
+    host = await _start(dut)
     cfg = {
         "per": 8.0,
         "msb_first": False,
@@ -279,7 +273,7 @@ async def jmp_err_on_map(dut):
             {"physical": 3, "mode": PinMode.INPUT, "idle": 1},
         ],
     }
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     # Dual-map sticky is registered; burn 2 cycles so ERR.MAP is live for JMP.
     src = """
     LDI r0, 0
@@ -290,8 +284,9 @@ async def jmp_err_on_map(dut):
     got: SET lp0=0
     hang2: JMP AL, hang2
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     saw = False
     for _ in range(24):
         await RisingEdge(dut.clk)
@@ -306,9 +301,8 @@ async def jmp_err_on_map(dut):
 @cocotb.test()
 async def in_t_with_xfer_pending_result_unchanged(dut):
     """IN.T must not set res_valid; XFER result remains available to MFS RX."""
-    await _start(dut)
-    await load_default_cfg(
-        dut,
+    host = await _start(dut)
+    await host.load_default_cfg(
         {
             "per": 8.0,
             "msb_first": False,
@@ -324,9 +318,9 @@ async def in_t_with_xfer_pending_result_unchanged(dut):
     SET lp0=0
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0
-    dut.ui_in.value = 1 << 3
+    await start_run(host, dut)
     saw = False
     for _ in range(80):
         await RisingEdge(dut.clk)

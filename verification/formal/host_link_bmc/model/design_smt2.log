@@ -1,0 +1,138 @@
+
+ /----------------------------------------------------------------------------\
+ |  yosys -- Yosys Open SYnthesis Suite                                       |
+ |  Copyright (C) 2012 - 2026  Claire Xenia Wolf <claire@yosyshq.com>         |
+ |  Distributed under an ISC-like license, type "license" to see terms        |
+ \----------------------------------------------------------------------------/
+ Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+
+-- Executing script file `design_smt2.ys' --
+
+1. Executing RTLIL frontend.
+Input filename: design_prep.il
+
+2. Executing HIERARCHY pass (managing design hierarchy).
+Attribute `top' found on module `host_link_formal_top'. Setting top module to host_link_formal_top.
+
+2.1. Analyzing design hierarchy..
+Top module:  \host_link_formal_top
+Used module:     \host_spi
+
+2.2. Analyzing design hierarchy..
+Top module:  \host_link_formal_top
+Used module:     \host_spi
+Removed 0 unused modules.
+Module host_link_formal_top directly or indirectly contains formal properties -> setting "keep" attribute.
+
+3. Executing FORMALFF pass.
+
+4. Executing DFFUNMAP pass (unmap clock enable and synchronous reset from FFs).
+
+5. Printing statistics.
+
+=== host_link_formal_top ===
+
+        +----------Local Count, excluding submodules.
+        | 
+       78 wires
+      183 wire bits
+       44 public wires
+      147 public wire bits
+       14 ports
+       51 port bits
+       50 cells
+        5   $anyinit
+        7   $assert
+        2   $assume
+        3   $eq
+       13   $ff
+        1   $initstate
+        2   $logic_and
+        4   $logic_not
+       12   $mux
+        1   $not
+        1 submodules
+        1   host_spi
+
+=== host_spi ===
+
+        +----------Local Count, excluding submodules.
+        | 
+      764 wires
+     2451 wire bits
+      144 public wires
+      470 public wire bits
+       36 ports
+      131 port bits
+      741 cells
+        3   $add
+        7   $and
+       54   $anyinit
+        1   $assume
+       22   $eq
+        3   $ge
+        3   $le
+       12   $logic_and
+        7   $logic_not
+        3   $logic_or
+      600   $mux
+        1   $ne
+        7   $not
+        2   $or
+       14   $pmux
+        1   $reduce_or
+        1   $sub
+
+=== design hierarchy ===
+
+        +----------Count including submodules.
+        | 
+      791 host_link_formal_top
+      741 host_spi
+
+        +----------Count including submodules.
+        | 
+      842 wires
+     2634 wire bits
+      188 public wires
+      617 public wire bits
+       50 ports
+      182 port bits
+        - memories
+        - memory bits
+        - processes
+      791 cells
+        3   $add
+        7   $and
+       59   $anyinit
+        7   $assert
+        3   $assume
+       25   $eq
+       13   $ff
+        3   $ge
+        1   $initstate
+        3   $le
+       14   $logic_and
+       11   $logic_not
+        3   $logic_or
+      612   $mux
+        1   $ne
+        8   $not
+        2   $or
+       14   $pmux
+        1   $reduce_or
+        1   $sub
+        1 submodules
+        1   host_spi
+
+6. Executing SMT2 backend.
+
+6.1. Executing BMUXMAP pass.
+
+6.2. Executing DEMUXMAP pass.
+Creating SMT-LIBv2 representation of module host_spi.
+Creating SMT-LIBv2 representation of module host_link_formal_top.
+
+End of script. Logfile hash: 5fdce7b6ed, time: 0.01s, user: 0.01s, system: 0.00s, MEM: 15.83 MB peak
+Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
+Time spent: 69% 2x write_smt2 (0 sec), 21% 2x read_rtlil (0 sec), ...

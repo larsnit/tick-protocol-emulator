@@ -111,35 +111,29 @@ done:  WAIT   tick, stop       ; consume end-of-stop tick
 
 ## Pinout (Tiny Tapeout)
 
-| Pins | Direction | `RUN=0` (load / cfg) | `RUN=1` (execute) |
-|---|---|---|---|
-| `ui[0]` | in | HOST_WR (pulse push host FIFO) | same |
-| `ui[1]` | in | HOST_RD (pulse pop host read) | same |
-| `ui[2]` | in | IMEM_WE (pulse write instruction) | same |
-| `ui[3]` | in | RUN = 0 | RUN = 1 |
-| `ui[7:4]` | in | CMD nibble (`0x8`…`0xF`) | ignored for load |
-| `uio[7:0]` | bidir | load / cfg data (`uio_oe=0`) | logical pins (any of 8 via cfg pinmap) |
-| `uo[7:0]` | out | **cfg readback latch** (after CFG_RD `0x8`) | status: `{0, pin0, TICK, MISS, WAITING, HOST_EMPTY, HOST_FULL, HOST_RDATA0}` |
+| Pins | Direction | Signal |
+|---|---|---|
+| `ui[0]` | in | SCLK |
+| `ui[1]` | in | MOSI |
+| `ui[2]` | in | CS_n (active low) |
+| `ui[3..7]` | in | reserved (tie low) |
+| `uo[0]` | out | MISO |
+| `uo[1]` | out | IRQ |
+| `uo[2]` | out | RUN (mirrors `CTRL.RUN`) |
+| `uo[3]` | out | ERR (sticky core error) |
+| `uo[4]` | out | MISS |
+| `uo[5]` | out | TICK |
+| `uo[6..7]` | out | reserved (0) |
+| `uio[7:0]` | bidir | protocol pins only (logical pins via cfg pinmap) |
 
-While `!RUN`, `uio_oe = 0` so the host can drive the load bus. A 4-wire host SPI
-target on `ui`/`uo` is planned so all eight `uio` stay protocol-only.
+Host link is SPI mode 0, max SCLK = f_clk/8. See `docs/isa.md` § Host link.
 
 ## Using the chip
 
-**Load** (with `RUN=0`): put a command nibble on `ui[7:4]` and data on `uio[7:0]`,
-then pulse the strobe where needed:
-
-| CMD | Meaning | Strobe |
-|---|---|---|
-| `0x9` | config address | — |
-| `0xF` | config write (`uio` → `cfg[addr]`, then addr++) | rising edge of nibble |
-| `0x8` | config read → latch; `uo_out` mirrors the latch | rising edge of nibble |
-| `0xA` | instruction address | — |
-| `0xB` / `0xC` | instruction lo / hi byte | `IMEM_WE` (`ui[2]`) |
-| `0xD` / `0xE` | host word lo / flags | `HOST_WR` (`ui[0]`) |
-
-Then set `RUN=1` (`ui[3]`) to execute. Logical pins map to any `uio[7:0]` via the
-config registers (demos often use `uio[0]`).
+Use `tick.host_link.HostLink` (cocotb or scripts): `load_program`, `cfg_write` /
+`cfg_read`, `run`/`stop` (`CTRL.RUN`), `push`/`pull`, `status`. Set `CTRL.RUN=1`
+after loading IMEM and config. Logical pins map to any `uio[7:0]` via the config
+registers (demos often use `uio[0]`).
 
 **Waveforms:** `make test-rtl` writes `verification/rtl/tb.fst`. Open it in
 [Surfer](https://surfer-project.org/) or GTKWave.

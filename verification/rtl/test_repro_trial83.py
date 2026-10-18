@@ -19,9 +19,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import rtl_pads, start_run
 
-ALIGN = 1
 IMG = [int(x, 16) for x in [
     "0x4401", "0x350c", "0x4000", "0x3514", "0x4001", "0x5020", "0x5220", "0x5420",
     "0x5620", "0x5820", "0x5a20", "0x5c20", "0x5e20", "0x5420", "0x3038", "0x100",
@@ -50,7 +51,7 @@ HOST = [0x383, 0xd0, 0x225, 0x215, 0x47, 0x22f, 0x33d, 0x317]
 EXT = [42, 224, 142, 184, 76, 188, 86, 70, 196, 176, 234, 248, 112, 94, 4, 238, 156, 50, 132, 110, 40, 50, 66, 240, 182, 156, 18, 157, 84, 182, 54, 230, 64]
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def trial83_lockstep(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     m = Machine()
@@ -58,6 +59,9 @@ async def trial83_lockstep(dut):
     m.load(IMG, [CFG])
     for hw in HOST:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    m.phys_ext = [(EXT[0] >> p) & 1 for p in range(8)]
+    m.step()  # warmup
+    PIN_LEAD = 1
     iss = []
     for cy in range(40):
         m.phys_ext = [(EXT[min(cy, len(EXT) - 1)] >> p) & 1 for p in range(8)]
@@ -68,25 +72,25 @@ async def trial83_lockstep(dut):
                 oe |= 1 << p
                 out |= (m.phys_drive[p] & 1) << p
         iss.append((out, oe, m.ctx[0].pc))
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     core = dut.user_project.core
-    for cy in range(40 + ALIGN):
-        dut.uio_in.value = EXT[min(cy, len(EXT) - 1)]
+    dut.uio_in.value = EXT[0]
+    await RisingEdge(dut.clk)  # warmup
+    for cy in range(40):
+        dut.uio_in.value = EXT[min(cy + PIN_LEAD, len(EXT) - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
-        io, ie, ipc = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        io, ie, ipc = iss[cy]
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
         assert ie == re and (io & ie) == (ro & re), (
-            f"cy={i} ISS=({io:#04x},{ie:#04x}) pc={ipc} RTL=({ro:#04x},{re:#04x}) pc={rpc}"
+            f"cy={cy} ISS=({io:#04x},{ie:#04x}) pc={ipc} RTL=({ro:#04x},{re:#04x}) pc={rpc}"
         )
-        assert ipc == rpc, f"cy={i} pc ISS={ipc} RTL={rpc}"
+        assert ipc == rpc, f"cy={cy} pc ISS={ipc} RTL={rpc}"

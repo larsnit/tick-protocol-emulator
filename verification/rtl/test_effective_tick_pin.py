@@ -14,9 +14,9 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, PinMode, TickSource, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 
 
 def _cfg(*, tick_pin: int, clk_lp: int, clk_en: bool):
@@ -85,20 +85,19 @@ async def mts_ecfg_clk_en_ticks_from_clk_lp(dut):
     assert iss[12][2] == 0, "tick_pin rise must not count before/without CLK_LP"
     assert max(r[2] for r in iss) >= 1, "CLK_LP rise must tick after ECFG"
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    dut.ui_in.value = 1 << 3
-    for cy in range(n + ALIGN):
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(host, dut)
+    for cy in range(n):
         dut.uio_in.value = ext[min(cy, n - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         io, ie, ir1 = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        ro, re = rtl_pads(dut)
         assert ie == re and (io & ie) == (ro & re), (
             f"cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x}) r1={ir1}"
         )

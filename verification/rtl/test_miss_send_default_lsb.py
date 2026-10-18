@@ -8,9 +8,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT/"sw"))
 from tick import Machine, MissPolicy, PinMode, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN=1
 
 @cocotb.test()
 async def miss_send_default_lsb_od_lockstep(dut):
@@ -36,16 +36,18 @@ async def miss_send_default_lsb_od_lockstep(dut):
             if m.phys_oe[p]:
                 oe|=1<<p; out|=(m.phys_drive[p]&1)<<p
         iss.append((out,oe))
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0,cfg,enable_mask=None))
-    await load_cfg_bytes(dut,{0x00:0x01})
-    await load_program(dut,img)
-    dut.ui_in.value=1<<3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0,cfg,enable_mask=None))
+    await host.cfg_write_map({0x00:0x01})
+    await host.load_program(img)
+    dut.uio_in.value = 0xFF
+    await start_run(host, dut)
     rtl=[]
-    for cy in range(n+ALIGN):
+    for cy in range(n):
         dut.uio_in.value=0xFF
         await RisingEdge(dut.clk)
         rtl.append((int(dut.uio_out.value)&0xFF, int(dut.uio_oe.value)&0xFF))
     for i in range(n):
-        io,ie=iss[i]; ro,re=rtl[i+ALIGN]
+        io,ie=iss[i]; ro,re=rtl[i]
         assert ie==re and (io&ie)==(ro&re), f"cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"

@@ -13,12 +13,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, PinMode, assemble
-from rtl_bus import load_default_cfg, load_program, push_host, reset_dut
+from tick.host_link import HostLink
 
 
 async def _start(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
-    await reset_dut(dut)
+    host = HostLink(dut)
+    await host.reset()
+    return host
 
 
 async def _run_until_pin(dut, pin: int, val: int, cycles: int = 80) -> bool:
@@ -50,8 +52,8 @@ def _pp_cfg(per: float = 4.0, **extra):
 
 @cocotb.test()
 async def alu_sub_borrow_equality(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     LDI r0, 1
     LDI r1, 2
@@ -67,15 +69,15 @@ async def alu_sub_borrow_equality(dut):
     eq: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1)
 
 
 @cocotb.test()
 async def alu_cmp_same_as_sub_flags(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     LDI r0, 1
     LDI r1, 2
@@ -85,15 +87,15 @@ async def alu_cmp_same_as_sub_flags(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1)
 
 
 @cocotb.test()
 async def alu_shr_carry(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     LDI r0, 5
     ALU SHR r0, r0
@@ -102,15 +104,15 @@ async def alu_shr_carry(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1)
 
 
 @cocotb.test()
 async def alu_logic_and_mov_clear_c(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     LDI r0, 0x80
     LDI r1, 0x80
@@ -136,15 +138,15 @@ async def alu_logic_and_mov_clear_c(dut):
     mov_ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=40)
 
 
 @cocotb.test()
 async def jmp_r1dec_zero_and_one(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     LDI r1, 0
     JMP r1--, skip0
@@ -158,8 +160,8 @@ async def jmp_r1dec_zero_and_one(dut):
     took: SET lp3=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     saw2 = saw3 = False
     for _ in range(40):
         await RisingEdge(dut.clk)
@@ -175,8 +177,8 @@ async def jmp_r1dec_zero_and_one(dut):
 @cocotb.test()
 async def time_lh_latch_across_carry(dut):
     """MFS TIME_L latches high; TIME_H returns latch after counter wraps past 255."""
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg(per=2.0))
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg(per=2.0))
     # Start timer, burn ~300 cycles via r1-- loop, then read TIME_L/H and show on pins.
     src = """
     SET.T lp0=1
@@ -190,14 +192,14 @@ async def time_lh_latch_across_carry(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=400)
 
 
 @cocotb.test()
 async def err_w1c_only_written_bits(dut):
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg()
     cfg["pins"] = [
         {"physical": 0, "mode": PinMode.PUSHPULL, "idle": 1},
@@ -205,7 +207,7 @@ async def err_w1c_only_written_bits(dut):
         {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
         {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
     ]
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     LDI r0, 0
     LDI r0, 0
@@ -220,15 +222,15 @@ async def err_w1c_only_written_bits(dut):
     map_remains: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=40)
 
 
 @cocotb.test()
 async def overrun_two_xfer_jmp_err(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg(per=2.0))
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg(per=2.0))
     src = """
     LDI r0, 0x55
     XFER r0, 2, out
@@ -245,15 +247,15 @@ async def overrun_two_xfer_jmp_err(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=120)
 
 
 @cocotb.test()
 async def xfer_in_16bit_rx_rxh(dut):
     """16-bit XFER in with pin held high → RX=0xFF, RXH=0xFF (MSB or LSB)."""
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg(per=2.0, msb_first=False, dout_lp=0, din_lp=1)
     cfg["pins"] = [
         {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
@@ -261,7 +263,7 @@ async def xfer_in_16bit_rx_rxh(dut):
         {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
         {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
     ]
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     XFER 16, in
     LDI r1, 60
@@ -278,16 +280,16 @@ async def xfer_in_16bit_rx_rxh(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0x01  # pin0 high for IN sample on dout_lp
-    dut.ui_in.value = 1 << 3
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=200)
 
 
 @cocotb.test()
 async def mts_pc_jump_table(dut):
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     src = """
     PULL r0
     MTS PC, r0
@@ -300,15 +302,15 @@ async def mts_pc_jump_table(dut):
     words = assemble(src)
     # Find handler addresses from assembled labels via disassembly of known layout:
     # 0 PULL, 1 MTS, 2 hang, 3 h0, 4 loop0, 5 h1, 6 loop1
-    await load_program(dut, words)
-    await push_host(dut, 5)  # jump to h1
-    dut.ui_in.value = 1 << 3
+    await host.load_program(words)
+    await host.push(5)  # jump to h1
+    await host.run()
     assert await _run_until_pin(dut, 3, 1, cycles=40)
 
 
 @cocotb.test()
 async def arb_od_both_external_low(dut):
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg(per=2.0)
     cfg["pins"] = [
         {"physical": 0, "mode": PinMode.OPENDRAIN, "idle": 1},
@@ -318,7 +320,7 @@ async def arb_od_both_external_low(dut):
     ]
     cfg["dout_lp"] = 0
     cfg["din_lp"] = 1
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     # XFER both with data bit1=1 → OD release; hold pin0 low → ARB
     src = """
     LDI r0, 0xFF
@@ -335,18 +337,18 @@ async def arb_od_both_external_low(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0  # hold bus low
-    dut.ui_in.value = 1 << 3
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=120)
 
 
 @cocotb.test()
 async def pull_nb_default_under(dut):
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg()
     cfg["default_byte"] = 0xA5
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     PULL.NB r0
     LDI r1, 0xA5
@@ -360,15 +362,15 @@ async def pull_nb_default_under(dut):
     ok: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1)
 
 
 @cocotb.test()
 async def jmp_sees_same_cycle_wait_flags(dut):
     """WAIT tick → JMP TK and IN.T → JMP C see same-cycle flag updates (isa.md §3.1)."""
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg(per=4.0)
     cfg["pins"] = [
         {"physical": 0, "mode": PinMode.INPUT, "idle": 1},
@@ -376,7 +378,7 @@ async def jmp_sees_same_cycle_wait_flags(dut):
         {"physical": 2, "mode": PinMode.PUSHPULL, "idle": 0},
         {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
     ]
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     WAIT tick
     JMP TK, got_tk
@@ -388,9 +390,9 @@ async def jmp_sees_same_cycle_wait_flags(dut):
     got_c: SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
+    await host.load_program(assemble(src))
     dut.uio_in.value = 0x01  # phys0 high for IN.T → C=1
-    dut.ui_in.value = 1 << 3
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=120)
 
 
@@ -402,9 +404,9 @@ async def mfs_time_l_matches_iss_post_increment(dut):
     then runs on the cycle where ISS has just incremented time to 4 (even).
     Pre-fix RTL exposed pre-increment TIME (=3, odd) and failed the JMP Z.
     """
-    await _start(dut)
+    host = await _start(dut)
     cfg = _pp_cfg(per=4.0)
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     SET.T lp2=0
     LDI r0, 0
@@ -418,8 +420,8 @@ async def mfs_time_l_matches_iss_post_increment(dut):
     even_ok: SET lp3=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 3, 1, cycles=80)
 
 
@@ -430,8 +432,8 @@ async def push_fills_all_eight_host_fifo_slots(dut):
     Pre-fix RTL used pointer-full (wptr+1==rptr) and stalled on the 8th PUSH
     while ISS still accepted it — lockstep PC desync under PUSH pressure.
     """
-    await _start(dut)
-    await load_default_cfg(dut, _pp_cfg())
+    host = await _start(dut)
+    await host.load_default_cfg( _pp_cfg())
     # Eight PUSHes then SET lp2; a 7-deep FIFO would hang forever on the 8th.
     src = """
     LDI r0, 1
@@ -446,15 +448,15 @@ async def push_fills_all_eight_host_fifo_slots(dut):
     SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=40)
 
 
 @cocotb.test()
 async def soft_wait_host_requires_ev0_host_data(dut):
     """Soft WAIT ev0 must not complete on host FIFO unless EV0 kind is HOST_DATA."""
-    await _start(dut)
+    host = await _start(dut)
     # Explicit LEVEL_HIGH on lp0 (not HOST_DATA). OD idle0 drives low after sync settles.
     cfg = _pp_cfg(per=4.0)
     cfg["pins"] = [
@@ -464,7 +466,7 @@ async def soft_wait_host_requires_ev0_host_data(dut):
         {"physical": 3, "mode": PinMode.PUSHPULL, "idle": 0},
     ]
     cfg["events"] = [{"kind": EventKind.LEVEL_HIGH}]
-    await load_default_cfg(dut, cfg)
+    await host.load_default_cfg( cfg)
     src = """
     LDI r1, 12
     settle: JMP r1--, settle
@@ -472,9 +474,9 @@ async def soft_wait_host_requires_ev0_host_data(dut):
     SET lp2=1
     hang: JMP AL, hang
     """
-    await load_program(dut, assemble(src))
-    await push_host(dut, 0x11)
-    dut.ui_in.value = 1 << 3
+    await host.load_program(assemble(src))
+    await host.push(0x11)
+    await host.run()
     for _ in range(60):
         await RisingEdge(dut.clk)
         oe = int(dut.uio_oe.value)
@@ -482,10 +484,11 @@ async def soft_wait_host_requires_ev0_host_data(dut):
         assert not ((oe >> 2) & 1 and (out >> 2) & 1), "WAIT completed without HOST_DATA EV0"
 
     # Same program with EV0=HOST_DATA must complete and drive lp2.
-    await reset_dut(dut)
+    host = HostLink(dut)
+    await host.reset()
     cfg["events"] = [{"kind": EventKind.HOST_DATA}]
-    await load_default_cfg(dut, cfg)
-    await load_program(dut, assemble(src))
-    await push_host(dut, 0x22)
-    dut.ui_in.value = 1 << 3
+    await host.load_default_cfg( cfg)
+    await host.load_program(assemble(src))
+    await host.push(0x22)
+    await host.run()
     assert await _run_until_pin(dut, 2, 1, cycles=80)

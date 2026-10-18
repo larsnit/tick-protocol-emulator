@@ -282,9 +282,11 @@ module tick_issue (
             if (instr[11]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                // Trap same cycle already requested stop; timer_run still 1.
-                if (!timer_run || trap_req || miss_trap_req)
-                  tcmd_start = 1'b1;
+                // Always request start on a successful timed post (ISS
+                // ``_ensure_timer_for_timed``). Same-cycle queue STOP (WAIT
+                // tc=stop) or soft-wait STOP leaves timer_run=1 in this combo
+                // cycle; start-after-stop in tick_timer still restarts.
+                tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd1;
                 post_oe = instr[10];
@@ -304,8 +306,7 @@ module tick_issue (
             if (instr[11]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                if (!timer_run || trap_req || miss_trap_req)
-                  tcmd_start = 1'b1;
+                tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd2;
                 post_in_t = 1'b1;
@@ -328,8 +329,7 @@ module tick_issue (
             if (instr[9]) begin
               if (at_slots_full) stalled = 1'b1;
               else begin
-                if (!timer_run || trap_req || miss_trap_req)
-                  tcmd_start = 1'b1;
+                tcmd_start = 1'b1;
                 post_en = 1'b1;
                 post_kind = 2'd3;
                 waiting_d = 1'b1;
@@ -433,8 +433,7 @@ module tick_issue (
           4'b0110: begin // XFER
             if (at_slots_full) stalled = 1'b1;
             else begin
-              if (!timer_run || trap_req || miss_trap_req)
-                tcmd_start = 1'b1;
+              tcmd_start = 1'b1;
               post_en = 1'b1;
               post_kind = 2'd2;
               post_in_t = 1'b0;

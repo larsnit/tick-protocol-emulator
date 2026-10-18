@@ -20,12 +20,12 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import encode_jmp, encode_set, encode_wait, JmpCond, WaitTc
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
+from rtl_only import RTL_ONLY
 
-ALIGN = 1
 
-
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes dbg_waiting / dbg_timer_run / dbg_pc
 async def idle_drive_before_run_no_false_latched_edge(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     # Minimal: soft WAIT EV0 (latched rise on PP idle-high), hang. MISS send-default
@@ -63,7 +63,7 @@ async def idle_drive_before_run_no_false_latched_edge(dut):
     }
     n = 40
     # Load traffic on uio while !run (random-ish bytes) to stress pre-run sync.
-    ext = [0x00] * (n + ALIGN + 2)
+    ext = [0x00] * (n + 2)
 
     m = Machine()
     m.load(img, [cfg])
@@ -78,13 +78,15 @@ async def idle_drive_before_run_no_false_latched_edge(dut):
                 out |= (m.phys_drive[p] & 1) << p
         iss.append((out, oe, m.ctx[0].waiting, m.ctx[0].timer_running, m.ctx[0].pc))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)  # uio carries imem bytes while !run
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(img)  # uio carries imem bytes while !run
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(host, dut)
     rtl = []
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = ext[min(cy, len(ext) - 1)]
         await RisingEdge(dut.clk)
         core = dut.user_project.core
@@ -100,7 +102,7 @@ async def idle_drive_before_run_no_false_latched_edge(dut):
 
     for i in range(n):
         io, ie, iw, it, ipc = iss[i]
-        ro, re, rw, rt, rpc = rtl[i + ALIGN]
+        ro, re, rw, rt, rpc = rtl[i]
         assert ie == re and (io & ie) == (ro & re), (
             f"cy={i} pin ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"
         )

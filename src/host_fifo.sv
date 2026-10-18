@@ -21,7 +21,8 @@ module host_fifo #(
     output wire             full,
     input  wire             rd,
     output wire [WIDTH-1:0] rdata,
-    output wire             empty
+    output wire             empty,
+    output wire [3:0]       count  // 0..DEPTH (DEPTH<=15)
 );
   localparam integer AW = $clog2(DEPTH);
   localparam integer CW = AW + 1;
@@ -35,6 +36,7 @@ module host_fifo #(
   assign full  = (count_q == CW'(DEPTH));
   assign empty = (count_q == {CW{1'b0}});
   assign rdata = mem_q[rptr_q];
+  assign count = 4'(count_q);
 
   always @(*) begin
     // Same-cycle wr+rd when full keeps occupancy at DEPTH (ISS list append/pop).

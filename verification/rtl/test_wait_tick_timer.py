@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import Machine, PinMode, TickSource, assemble
-from rtl_bus import load_default_cfg, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
 K_VALUES = (0, 1, 3, 5)
 
@@ -49,10 +50,12 @@ def iss_first_edge(k: int) -> int:
 
 
 async def rtl_first_edge(dut, k: int) -> int:
-    await reset_dut(dut)
-    await load_default_cfg(dut)
-    await load_program(dut, assemble(_src(k)))
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.load_default_cfg()
+    await host.load_program(assemble(_src(k)))
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     prev = None
     for cy in range(80):
         await RisingEdge(dut.clk)
@@ -81,4 +84,4 @@ async def wait_tick_timer_guard(dut):
     assert len(set(rtl_edges.values())) == 1, (
         f"RTL first edge moved with padding: {rtl_edges} (ISS stays at {ref})"
     )
-    assert rtl_edges[0] == ref + 1, (rtl_edges, ref)
+    assert rtl_edges[0] == ref, (rtl_edges, ref)

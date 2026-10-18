@@ -15,7 +15,8 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import JmpCond, Spr, XferMode, encode_jmp, encode_ldi, encode_mts, encode_xfer
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
 IMG = [
     encode_ldi(1, 0x0F),  # MSB|CLK_EN|CPHA|CPOL
@@ -44,7 +45,6 @@ CFG = {
 }
 HOST = [0x300]
 EXT = [0] * 40
-ALIGN = 1
 N_CYC = 24
 
 
@@ -71,21 +71,23 @@ async def lockstep_clk_en_after_mts_ecfg(dut):
     """CLK_EN via MTS ECFG: pad drive matches ISS (two ticks per bit)."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     iss = _iss_trace()
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     rtl = []
-    for cy in range(N_CYC + ALIGN):
+    for cy in range(N_CYC):
         dut.uio_in.value = EXT[min(cy, len(EXT) - 1)]
         await RisingEdge(dut.clk)
-        rtl.append((int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF))
+        rtl.append(rtl_pads(dut))
     for i in range(N_CYC):
         io, ie = iss[i]
-        ro, re = rtl[i + ALIGN]
+        ro, re = rtl[i]
         assert ie == re and (io & ie) == (ro & re), (
             f"CLK_EN lockstep cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"
         )

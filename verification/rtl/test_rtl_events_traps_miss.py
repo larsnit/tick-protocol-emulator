@@ -14,15 +14,16 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, assemble
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 
 
 async def _lockstep(dut, img, cfg, n_cyc, ext, host=None):
+    host_words = host or []
     m = Machine()
     m.load(img, [cfg])
-    for hw in host or []:
+    for hw in host_words:
         m.host_push(hw & 0xFF)
     iss = []
     for cy in range(n_cyc):
@@ -35,20 +36,19 @@ async def _lockstep(dut, img, cfg, n_cyc, ext, host=None):
                 out |= (m.phys_drive[p] & 1) << p
         iss.append((out, oe, m.ctx[0].pc, m.ctx[0].evf, m.ctx[0].ev_pending, m.ctx[0].miss))
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, cfg, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, img)
-    for hw in host or []:
-        from rtl_bus import push_host
-        await push_host(dut, hw & 0xFF)
-    dut.ui_in.value = 1 << 3
-    for cy in range(n_cyc + ALIGN):
+    hl = HostLink(dut)
+    await hl.reset()
+    await hl.cfg_write_map(dict_to_bytes(0, cfg, enable_mask=None))
+    await hl.cfg_write_map({0x00: 0x01})
+    await hl.load_program(img)
+    for hw in host_words:
+        await hl.push(hw & 0xFF)
+    dut.uio_in.value = ext[0] if ext else 0
+    await start_run(hl, dut)
+    for cy in range(n_cyc):
         dut.uio_in.value = ext[min(cy, len(ext) - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         i_out, i_oe, *_ = iss[i]
         r_out = int(dut.uio_out.value) & 0xFF
         r_oe = int(dut.uio_oe.value) & 0xFF

@@ -2,18 +2,12 @@
  * Copyright (c) 2026 Lars Nitschke
  * SPDX-License-Identifier: Apache-2.0
  *
- * Tiny Tapeout top: host load/control on ui_in, protocol pins on uio[7:0].
+ * Tiny Tapeout top: 4-pin SPI host link on ui/uo; protocol pins on uio[7:0].
  *
- * Pinout (parallel bring-up; host SPI shim deferred):
- *   ui_in[0]     : host_wr
- *   ui_in[1]     : host_rd
- *   ui_in[2]     : imem_we
- *   ui_in[3]     : run
- *   ui_in[7:4]   : load mux select
- *   uo_out       : while !run = cfg readback latch; while run = status
- *   uio[7:0]     : 8 protocol pins (logical pins mapped via config)
- *
- * Parallel cfg nibbles (docs/isa.md): 0x9 CFG_ADDR, 0xF CFG_WR, 0x8 CFG_RD.
+ *   ui[0] SCLK   ui[1] MOSI   ui[2] CS_n   ui[3..7] reserved (tie low)
+ *   uo[0] MISO   uo[1] IRQ    uo[2] RUN    uo[3] ERR
+ *   uo[4] MISS   uo[5] TICK   uo[6..7] reserved (0)
+ *   uio[7:0] protocol only (always)
  */
 
 `default_nettype none
@@ -28,91 +22,81 @@ module tt_um_larsnitschke_tick (
     input  wire       clk,
     input  wire       rst_n
 );
-  wire run = ui_in[3];
-  wire imem_we = ui_in[2] & ~run;
-  wire host_wr = ui_in[0] & ~run;
-  wire host_rd = ui_in[1];
-  wire [3:0] nibble = ui_in[7:4];
-
-  reg [5:0]  load_addr;
-  reg [15:0] load_word;
-  reg [9:0]  host_word;
-  reg        prev_wr, prev_imem;
-  reg        prev_f, prev_8;
-  reg [7:0]  cfg_addr_latch;
-  reg [7:0]  cfg_rdata_latch;
-  reg        cfg_re_d;
-
-  wire wr_pulse = host_wr & ~prev_wr;
-  wire im_pulse = imem_we & ~prev_imem;
-  wire cfg_wr_pulse = (!run) & (nibble == 4'hF) & ~prev_f;
-  wire cfg_re_pulse = (!run) & (nibble == 4'h8) & ~prev_8;
-
-  wire [7:0] cfg_rdata;
-  wire [7:0] core_uio_out, core_uio_oe;
-
-  always @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      prev_wr <= 1'b0;
-      prev_imem <= 1'b0;
-      prev_f <= 1'b0;
-      prev_8 <= 1'b0;
-      load_addr <= 6'd0;
-      load_word <= 16'h0;
-      host_word <= 10'h0;
-      cfg_addr_latch <= 8'h00;
-      cfg_rdata_latch <= 8'h00;
-      cfg_re_d <= 1'b0;
-    end else begin
-      prev_wr <= host_wr;
-      prev_imem <= imem_we;
-      prev_f <= (!run) & (nibble == 4'hF);
-      prev_8 <= (!run) & (nibble == 4'h8);
-      cfg_re_d <= cfg_re_pulse;
-      if (cfg_re_d)
-        cfg_rdata_latch <= cfg_rdata;
-
-      if (!run && nibble == 4'hA)
-        load_addr <= uio_in[5:0];
-      if (!run && nibble == 4'hB)
-        load_word[7:0] <= uio_in;
-      if (!run && nibble == 4'hC)
-        load_word[15:8] <= uio_in;
-      if (!run && nibble == 4'hD)
-        host_word[7:0] <= uio_in;
-      if (!run && nibble == 4'hE)
-        host_word[9:8] <= uio_in[1:0];
-      if (!run && nibble == 4'h9)
-        cfg_addr_latch <= uio_in;
-      if (cfg_wr_pulse)
-        cfg_addr_latch <= cfg_addr_latch + 8'd1;
-    end
-  end
-
-  wire        host_full, host_empty;
-  wire [9:0]  host_rdata;
+  wire        spi_run, soft_rst;
+  wire        cfg_we, cfg_re;
+  wire [7:0]  cfg_addr, cfg_wdata, cfg_rdata;
+  wire        imem_we, imem_hreq;
+  wire [5:0]  imem_waddr, imem_hraddr;
+  wire [15:0] imem_wdata, imem_hrdata;
+  wire        host_wr, host_rd, host_full, host_empty;
+  wire [9:0]  host_wdata, host_rdata;
+  wire [3:0]  host_tx_count, host_rx_count;
+  wire        enable0, err_any;
+  wire        miso, irq;
   wire [5:0]  dbg_pc;
-  wire        dbg_waiting, dbg_miss, dbg_tick;
-  wire        dbg_timer_run;
+  wire        dbg_waiting, dbg_miss, dbg_tick, dbg_timer_run;
   wire [1:0]  dbg_a_kind, dbg_p_kind;
 
-  tick_core core (
+  host_spi u_host (
       .clk(clk),
       .rst_n(rst_n),
-      .imem_we(im_pulse),
-      .imem_waddr(load_addr),
-      .imem_wdata(load_word),
-      .host_wr(wr_pulse),
-      .host_wdata(host_word),
+      .sclk_i(ui_in[0]),
+      .mosi_i(ui_in[1]),
+      .cs_n_i(ui_in[2]),
+      .miso_o(miso),
+      .irq_o(irq),
+      .run_o(spi_run),
+      .soft_rst_o(soft_rst),
+      .cfg_we(cfg_we),
+      .cfg_re(cfg_re),
+      .cfg_addr(cfg_addr),
+      .cfg_wdata(cfg_wdata),
+      .cfg_rdata(cfg_rdata),
+      .imem_we(imem_we),
+      .imem_waddr(imem_waddr),
+      .imem_wdata(imem_wdata),
+      .imem_hreq(imem_hreq),
+      .imem_hraddr(imem_hraddr),
+      .imem_hrdata(imem_hrdata),
+      .host_wr(host_wr),
+      .host_wdata(host_wdata),
       .host_full(host_full),
       .host_rd(host_rd),
       .host_rdata(host_rdata),
       .host_empty(host_empty),
-      .run(run),
-      .cfg_we(cfg_wr_pulse),
-      .cfg_re(cfg_re_pulse),
-      .cfg_addr(cfg_addr_latch),
-      .cfg_wdata(uio_in),
+      .host_tx_count(host_tx_count),
+      .host_rx_count(host_rx_count),
+      .enable0(enable0),
+      .err_any(err_any)
+  );
+
+  wire [7:0] core_uio_out, core_uio_oe;
+
+  tick_core core (
+      .clk(clk),
+      .rst_n(rst_n),
+      .soft_rst(soft_rst),
+      .imem_we(imem_we),
+      .imem_waddr(imem_waddr),
+      .imem_wdata(imem_wdata),
+      .imem_hreq(imem_hreq),
+      .imem_hraddr(imem_hraddr),
+      .imem_hrdata(imem_hrdata),
+      .host_wr(host_wr),
+      .host_wdata(host_wdata),
+      .host_full(host_full),
+      .host_rd(host_rd),
+      .host_rdata(host_rdata),
+      .host_empty(host_empty),
+      .host_tx_count(host_tx_count),
+      .host_rx_count(host_rx_count),
+      .enable0(enable0),
+      .err_any(err_any),
+      .run(spi_run),
+      .cfg_we(cfg_we),
+      .cfg_re(cfg_re),
+      .cfg_addr(cfg_addr),
+      .cfg_wdata(cfg_wdata),
       .cfg_rdata(cfg_rdata),
       .uio_in(uio_in),
       .uio_out(core_uio_out),
@@ -126,15 +110,15 @@ module tt_um_larsnitschke_tick (
       .dbg_p_kind(dbg_p_kind)
   );
 
-  // !run: full-byte cfg readback. run: status (pin0 mirror on bit6).
-  assign uo_out = run
-      ? {1'b0, core_uio_out[0], dbg_tick, dbg_miss, dbg_waiting, host_empty, host_full, host_rdata[0]}
-      : cfg_rdata_latch;
-
+  // Pads Hi-Z while !RUN (pins inputs). Queue still computes idle map_oe
+  // combinationally so pin sync settles before run rise.
   assign uio_out = core_uio_out;
-  assign uio_oe  = run ? core_uio_oe : 8'h00;
+  assign uio_oe  = spi_run ? core_uio_oe : 8'h00;
 
-  wire _unused = &{ena, dbg_pc, host_rdata[9:1], dbg_timer_run, dbg_a_kind, dbg_p_kind, 1'b0};
+  assign uo_out = {2'b00, dbg_tick, dbg_miss, err_any, spi_run, irq, miso};
+
+  wire _unused = &{ena, ui_in[7:3], dbg_pc, dbg_waiting, dbg_timer_run,
+                   dbg_a_kind, dbg_p_kind, 1'b0};
 endmodule
 
 `default_nettype wire

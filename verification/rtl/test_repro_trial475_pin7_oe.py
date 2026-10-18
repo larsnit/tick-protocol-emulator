@@ -20,9 +20,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
-from rtl_bus import load_cfg_bytes, load_program, push_host, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import rtl_pads, start_run
 
-ALIGN = 1
 IMG = [int(x, 16) for x in [
     "0x4401", "0x350c", "0x4000", "0x3514", "0x4001", "0x5020", "0x5220", "0x5420",
     "0x5620", "0x5820", "0x5a20", "0x5c20", "0x5e20", "0x600", "0x48a1", "0x7000",
@@ -74,7 +75,7 @@ EXT = [
 ]
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def pin7_oe_matches_iss_after_dout_lp3_idle(dut):
     """At fuzz trial 475 cy 44, phys7 OE must match ISS (undriven)."""
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
@@ -84,6 +85,9 @@ async def pin7_oe_matches_iss_after_dout_lp3_idle(dut):
     m.load(IMG, [CFG])
     for hw in HOST:
         m.host_push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    m.phys_ext = [(EXT[0] >> p) & 1 for p in range(8)]
+    m.step()  # warmup
+    PIN_LEAD = 1
     iss = []
     iss_pc = []
     for cy in range(n):
@@ -97,27 +101,27 @@ async def pin7_oe_matches_iss_after_dout_lp3_idle(dut):
         iss.append((out, oe))
         iss_pc.append(m.ctx[0].pc)
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
     for hw in HOST:
-        await push_host(dut, hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
-    dut.ui_in.value = 1 << 3
+        await host.push(hw & 0xFF, last=bool(hw & 0x100), cmd=bool(hw & 0x200))
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     core = dut.user_project.core
+    dut.uio_in.value = EXT[0]
+    await RisingEdge(dut.clk)  # warmup
     first = None
-    for cy in range(n + ALIGN):
-        dut.uio_in.value = EXT[min(cy, n - 1)]
+    for cy in range(n):
+        dut.uio_in.value = EXT[min(cy + PIN_LEAD, n - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
-        io, ie = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        io, ie = iss[cy]
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
-        if ie != re or (io & ie) != (ro & re) or iss_pc[i] != rpc:
-            first = (i, io, ie, ro, re, iss_pc[i], rpc)
+        if ie != re or (io & ie) != (ro & re) or iss_pc[cy] != rpc:
+            first = (cy, io, ie, ro, re, iss_pc[cy], rpc)
             break
     assert first is None, (
         f"first diverge cy={first[0]} ISS=({first[1]:#04x},{first[2]:#04x}) "

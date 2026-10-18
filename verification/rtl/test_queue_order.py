@@ -10,14 +10,15 @@ from cocotb.triggers import RisingEdge
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 from tick import assemble
-from rtl_bus import load_default_cfg, load_program, reset_dut
+from tick.host_link import HostLink
 
 
 async def run_prog(dut, src, cycles=120):
-    await reset_dut(dut)
-    await load_default_cfg(dut)
-    await load_program(dut, assemble(src))
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.load_default_cfg()
+    await host.load_program(assemble(src))
+    await host.run()
     edges, prev, miss = [], None, None
     for cy in range(cycles):
         await RisingEdge(dut.clk)

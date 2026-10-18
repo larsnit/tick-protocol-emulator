@@ -21,9 +21,10 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, MissPolicy, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import JmpCond, encode_jmp, encode_ldi
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from rtl_only import RTL_ONLY
+from lockstep_harness import start_run, rtl_pads
 
-ALIGN = 1
 IMG = [
     encode_ldi(0, 0),
     encode_ldi(0, 1),
@@ -62,7 +63,7 @@ CFG = {
 EXT = [0xFF] * 16
 
 
-@cocotb.test()
+@cocotb.test(skip=RTL_ONLY)  # probes user_project.core
 async def no_phantom_qual_trap_after_run_rise(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     m = Machine()
@@ -81,21 +82,20 @@ async def no_phantom_qual_trap_after_run_rise(dut):
         iss.append((out, oe, m.ctx[0].pc))
         assert m.ctx[0].pc != 4, f"ISS phantom QUAL trap cy={cy}"
 
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
+    dut.uio_in.value = EXT[0] if EXT else 0
+    await start_run(host, dut)
     core = dut.user_project.core
-    for cy in range(n + ALIGN):
+    for cy in range(n):
         dut.uio_in.value = EXT[min(cy, len(EXT) - 1)]
         await RisingEdge(dut.clk)
-        if cy < ALIGN:
-            continue
-        i = cy - ALIGN
+        i = cy
         io, ie, ipc = iss[i]
-        ro = int(dut.uio_out.value) & 0xFF
-        re = int(dut.uio_oe.value) & 0xFF
+        ro, re = rtl_pads(dut)
         rpc = int(core.dbg_pc.value)
         assert rpc != 4, f"RTL phantom QUAL trap cy={i} pc={rpc}"
         assert ie == re and (io & ie) == (ro & re), (

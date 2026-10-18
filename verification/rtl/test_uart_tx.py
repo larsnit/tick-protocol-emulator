@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "sw"))
 from tick import assemble
-from rtl_bus import load_default_cfg, load_program, push_host, reset_dut
+from tick.host_link import HostLink
 
 
 @cocotb.test()
@@ -18,14 +18,15 @@ async def test_uart_tx_0x55(dut):
     clock = Clock(dut.clk, 20, unit="ns")
     cocotb.start_soon(clock.start())
 
-    await reset_dut(dut)
-    await load_default_cfg(dut)
+    host = HostLink(dut)
+    await host.reset()
+    await host.load_default_cfg()
 
     words = assemble((ROOT / "sw" / "programs" / "uart_tx.asm").read_text())
-    await load_program(dut, words)
-    await push_host(dut, 0x55, last=True)
+    await host.load_program(words)
+    await host.push(0x55, last=True)
 
-    dut.ui_in.value = 1 << 3
+    await host.run()
     pin_trace = []
     for _cy in range(300):
         await RisingEdge(dut.clk)

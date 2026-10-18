@@ -21,7 +21,8 @@ sys.path.insert(0, str(ROOT / "sw"))
 from tick import EventKind, Machine, PinMode, TickSource
 from tick.cfg import dict_to_bytes
 from tick.isa import JmpCond, WaitTc, encode_jmp, encode_ldi, encode_set, encode_wait
-from rtl_bus import load_cfg_bytes, load_program, reset_dut
+from tick.host_link import HostLink
+from lockstep_harness import start_run, rtl_pads
 
 # WAIT tick (per=4) → 4× LDI so the next miss tick coincides with JMP ERR.
 # If JMP misses same-cycle MISS it falls through and SETs OD LP1 low (phys7).
@@ -54,7 +55,6 @@ CFG = {
     ],
     "events": [{"kind": EventKind.HOST_DATA} for _ in range(4)],
 }
-ALIGN = 1
 N_CYC = 40
 
 
@@ -78,19 +78,21 @@ def _iss_trace():
 async def repro_trial1_jmp_err_same_cycle_miss(dut):
     cocotb.start_soon(Clock(dut.clk, 20, unit="ns").start())
     iss = _iss_trace()
-    await reset_dut(dut)
-    await load_cfg_bytes(dut, dict_to_bytes(0, CFG, enable_mask=None))
-    await load_cfg_bytes(dut, {0x00: 0x01})
-    await load_program(dut, IMG)
-    dut.ui_in.value = 1 << 3
+    host = HostLink(dut)
+    await host.reset()
+    await host.cfg_write_map(dict_to_bytes(0, CFG, enable_mask=None))
+    await host.cfg_write_map({0x00: 0x01})
+    await host.load_program(IMG)
+    dut.uio_in.value = 0
+    await start_run(host, dut)
     rtl = []
-    for cy in range(N_CYC + ALIGN):
+    for cy in range(N_CYC):
         dut.uio_in.value = 0
         await RisingEdge(dut.clk)
-        rtl.append((int(dut.uio_out.value) & 0xFF, int(dut.uio_oe.value) & 0xFF))
+        rtl.append(rtl_pads(dut))
     for i in range(N_CYC):
         io, ie = iss[i]
-        ro, re = rtl[i + ALIGN]
+        ro, re = rtl[i]
         if ie != re or (io & ie) != (ro & re):
             raise AssertionError(
                 f"mismatch cy={i} ISS=({io:#04x},{ie:#04x}) RTL=({ro:#04x},{re:#04x})"

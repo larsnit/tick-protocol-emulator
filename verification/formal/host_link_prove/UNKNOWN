@@ -1,0 +1,8 @@
+Elapsed clock time [H:MM:SS (secs)]: 0:00:02 (2)
+Elapsed process time [H:MM:SS (secs)]: 0:00:02 (2)
+engine_0 (smtbmc z3) returned pass for basecase
+engine_0 (smtbmc z3) returned FAIL for induction
+counterexample trace [induction]: engine_0/trace_induct.vcd
+counterexample trace [induction]: engine_0/trace_induct.yw
+  failed assertion host_link_formal_top._witness_.check_assert_host_link_formal_top_sv_94_21 at host_link_formal_top.sv:94.9-94.39
+  failed assertion host_link_formal_top._witness_.check_assert_host_link_formal_top_sv_95_23 at host_link_formal_top.sv:95.9-95.39

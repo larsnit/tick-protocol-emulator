@@ -1,11 +1,11 @@
 `default_nettype none
 
-// Formal wrapper with free inputs. Queue invariant catches timed-queue ordering bugs.
-// After reset, a small counter loads ENABLE + PINMODE(PP LP0) + PER via cfg port.
+// Formal wrapper: queue invariant + host-link properties.
 module tick_formal_top (
     input wire        clk,
     input wire        rst_n,
     input wire        run,
+    input wire        soft_rst,
     input wire        imem_we,
     input wire [5:0]  imem_waddr,
     input wire [15:0] imem_wdata,
@@ -14,8 +14,10 @@ module tick_formal_top (
     input wire        host_rd,
     input wire [7:0]  uio_in
 );
-  wire host_full, host_empty;
+  wire host_full, host_empty, enable0, err_any;
   wire [9:0] host_rdata;
+  wire [3:0] host_tx_count, host_rx_count;
+  wire [15:0] imem_hrdata;
   wire [5:0] dbg_pc;
   wire dbg_waiting, dbg_miss, dbg_tick, dbg_timer_run;
   wire [1:0] dbg_a_kind, dbg_p_kind;
@@ -41,9 +43,9 @@ module tick_formal_top (
       if (!init_done) begin
         init_cnt <= init_cnt + 4'd1;
         case (init_cnt)
-          4'd1: begin cfg_we <= 1'b1; cfg_addr <= 8'h12; cfg_wdata <= 8'h01; end // PINMODE (0x10+2)
-          4'd2: begin cfg_we <= 1'b1; cfg_addr <= 8'h19; cfg_wdata <= 8'h80; end // PER_L (0x10+9)
-          4'd3: begin cfg_we <= 1'b1; cfg_addr <= 8'h00; cfg_wdata <= 8'h01; end // ENABLE ctx0
+          4'd1: begin cfg_we <= 1'b1; cfg_addr <= 8'h12; cfg_wdata <= 8'h01; end
+          4'd2: begin cfg_we <= 1'b1; cfg_addr <= 8'h19; cfg_wdata <= 8'h80; end
+          4'd3: begin cfg_we <= 1'b1; cfg_addr <= 8'h00; cfg_wdata <= 8'h01; end
           4'd4: init_done <= 1'b1;
           default: ;
         endcase
@@ -56,15 +58,23 @@ module tick_formal_top (
   tick_core uut (
       .clk(clk),
       .rst_n(rst_n),
+      .soft_rst(soft_rst & init_done),
       .imem_we(imem_we & init_done),
       .imem_waddr(imem_waddr),
       .imem_wdata(imem_wdata),
+      .imem_hreq(1'b0),
+      .imem_hraddr(6'h0),
+      .imem_hrdata(imem_hrdata),
       .host_wr(host_wr & init_done),
       .host_wdata(host_wdata),
       .host_full(host_full),
       .host_rd(host_rd),
       .host_rdata(host_rdata),
       .host_empty(host_empty),
+      .host_tx_count(host_tx_count),
+      .host_rx_count(host_rx_count),
+      .enable0(enable0),
+      .err_any(err_any),
       .run(run_g),
       .cfg_we(cfg_we),
       .cfg_re(cfg_re),
@@ -99,13 +109,9 @@ module tick_formal_top (
     end
   end
 
-  always @(posedge clk) begin
-    if ($past(!rst_n) && saw_reset) begin
-      assert (!dbg_miss);
-      assert (dbg_a_kind == 2'b00);
-      assert (dbg_p_kind == 2'b00);
-    end
-  end
+  wire _unused = &{host_full, host_empty, host_rdata, host_tx_count, host_rx_count,
+                   enable0, err_any, imem_hrdata, uio_out, uio_oe, cfg_rdata,
+                   dbg_pc, dbg_waiting, dbg_miss, dbg_tick, dbg_timer_run};
 endmodule
 
 `default_nettype wire

@@ -1,8 +1,7 @@
 `default_nettype none
 
-// tick_imem — 64×16 instruction memory with sync write, async read.
-// Ports: we/waddr/wdata (write), raddr/rdata (combinational read).
-// Implements ISA §2 shared instruction memory.
+// tick_imem — 64×16 instruction memory, sync write, single async read.
+// Host IMEM_READ shares the fetch port (only legal while ctx0 disabled).
 module tick_imem (
     input  wire        clk,
     input  wire        rst_n,

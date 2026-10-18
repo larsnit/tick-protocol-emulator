@@ -60,6 +60,15 @@ executable reference.
      visible to an IN in cycle *N+3* (one cycle of own-drive feedback delay into
      the same 2-flop synchroniser path; glitch filter adds the same extra cycle
      when enabled).
+   - **IN / IN.T / XFER sample markers (M+4 vs M+6):** the sample itself lands at
+     *M+2* (or *M+3* with glitch). A program that does `IN` → `JMP C` → `SET`
+     marker on a pad therefore lights the marker at **M+4** on the ISS end-of-
+     cycle capture model and on the **registered** `uio_out`/`uio_oe` pads when
+     compared with the measured one-cycle pad lag (`ALIGN = 1`). **M+6** is an
+     alignment artefact: refreshing the ISS synchroniser mid-cycle (so the ISS
+     sees the pin one cycle early) and then comparing to registered pads
+     *without* that pad lag makes the marker appear two cycles late. Do not
+     treat M+6 as a second architectural latency.
 4. **A stopped timer restarts in one of two ways:**
    - at an event: `WAIT ev, rearm` sets tick 0 to event time + `PHASE`. The
      hardware does this at the event cycle, not when the instruction resumes;
@@ -181,26 +190,119 @@ enable mask, engine-clock fields) is written by the host at load time through th
 **configuration register map** (§2.1). Only values that change while a program
 runs go through instructions (PER/PHASE/ECFG via MTS, etc.).
 
-### Host link (decided)
-SPI target on 4 dedicated pins (SCLK, MOSI, CS_n on `ui`; MISO on `uo`). All
-8 `uio` pins are left for protocols. The link must move host words in both
-directions **while contexts run**. At ~clk/12 it is enough to load programs and
-stream UART and SPI-target demos, but not 10BASE-T.
+### Host link (4-pin SPI)
 
-### Parallel load command nibbles (`ui[7:4]`, while `RUN=0`)
+Approved 17 October 2026 (v0.2). The host (e.g. RP2040 on the Tiny Tapeout
+demo board) uses this link to load programs, configure the chip, start/stop,
+and stream data **while contexts run**. All 8 `uio` pins are protocol-only.
 
-| Nibble | Name | `uio[7:0]` / effect |
-|---|---|---|
-| `0xA` | IMEM_ADDR | Instruction address |
-| `0xB` | IMEM_LO | Instruction low byte |
-| `0xC` | IMEM_HI | Instruction high byte |
-| `0xD` | HOST_LO | Host TX word low (data) |
-| `0xE` | HOST_HI | Host TX word `{6'b0, CMD, LAST}` |
-| `0x9` | CFG_ADDR | Set config register address |
-| `0xF` | CFG_WR | Write `uio` to `cfg[CFG_ADDR]`, then `CFG_ADDR++` |
-| `0x8` | CFG_RD | Read `cfg[CFG_ADDR]` into the config readback latch (no auto-inc); while `RUN=0`, `uo_out[7:0]` mirrors that latch so the host can sample the byte |
+#### Pins
 
-The SPI host link will drive the same config read/write port later.
+| Pin | Signal | Direction | Notes |
+|---|---|---|---|
+| `ui[0]` | SCLK | in | from host |
+| `ui[1]` | MOSI | in | host → chip |
+| `ui[2]` | CS_n | in | active low; frames one transaction |
+| `ui[3..7]` | — | in | reserved, tie low |
+| `uo[0]` | MISO | out | chip → host; always driven (`uo` is not tri-state) |
+| `uo[1]` | IRQ | out | high while an enabled interrupt condition holds |
+| `uo[2]` | RUN | out | mirrors `CTRL.RUN` |
+| `uo[3]` | ERR | out | sticky core ERR register non-zero |
+| `uo[4]` | MISS | out | sticky MISS (context 0) |
+| `uo[5]` | TICK | out | tick pulse (context 0), for scope debugging |
+| `uo[6..7]` | — | out | reserved (0) |
+
+#### Electrical and timing
+
+- **SPI mode 0** (CPOL = 0, CPHA = 0), MSB first, 8-bit bytes. Host samples
+  MISO on the rising edge; the chip changes MISO after the falling edge.
+- **One clock domain.** SCLK, MOSI and CS_n are oversampled by the core clock
+  through 2-flop synchronisers and edge detectors (no CDC).
+- **Maximum SCLK = f_clk / 8** (6.25 MHz at 50 MHz). Recommended: f_clk / 10
+  (5 MHz). The chip sees a falling edge ~3 cycles late and needs ~1 more to
+  drive MISO, within half an SCLK period.
+- **CS timing (core clock cycles):** CS_n fall → first SCLK rise ≥ 4; last
+  SCLK fall → CS_n rise ≥ 4; CS_n high between transactions ≥ 4.
+- **Throughput at 5 MHz SCLK:** ≈ 600 kB/s pushes, ≈ 300 k entries/s pulls
+  (2 bytes per entry).
+
+#### Transaction format
+
+```
+CS_n  ‾‾\______________________________________________/‾‾
+MOSI      [ CMD ][ ARG ][ ... payload / dummy ... ]
+MISO      [STATUS][  0  ][ ... read data ...      ]
+```
+
+- Byte 1: host sends command; chip returns STATUS (§ below), snapshotted on
+  CS_n fall.
+- **Reads:** one dummy byte after the last command/address byte before data.
+- **Auto-increment** on multi-byte CFG/IMEM transfers.
+- CS_n rising ends the transaction; a partial byte is discarded. Multi-byte
+  units commit only when complete.
+
+| Code | Name | Host sends after CMD | Host receives | Notes |
+|---|---|---|---|---|
+| `0x00` | NOP | — | — | Status poll |
+| `0x01` | CFG_WRITE | ADDR, D0, D1, … | — | Auto-inc; write to enabled context → `ERR.CFG` |
+| `0x02` | CFG_READ | ADDR, dummy, then clocks | D0, D1, … | Auto-inc |
+| `0x03` | IMEM_WRITE | WADDR (0–63), HI0, LO0, … | — | Word after LO; rejected while owning context enabled |
+| `0x04` | IMEM_READ | WADDR, dummy, then clocks | HI0, LO0, … | Shares the fetch port; rejected while owning context enabled |
+| `0x10`–`0x13` | PUSH | data bytes | — | Bit1=CMD on all bytes; bit0=LAST on final byte (see below) |
+| `0x20` | PULL | dummy, then clocks | TAGBYTE, DATA, … | |
+| others | — | — | — | Ignored until CS_n rise; `LINKERR.BADCMD` |
+
+**PUSH with LAST:** each received byte is held one byte time. The next byte
+pushes the held byte without LAST; CS_n rise pushes the held byte with LAST
+if command bit 0 was set. Full FIFO → drop + `LINKERR.OVERFLOW`.
+
+**PULL:** each entry is `TAGBYTE = {VALID,0,0,0,0,0,TAG[1:0]}` then `DATA`.
+Empty → VALID=0, DATA=0, nothing consumed. Entry consumed only after both
+bytes leave; CS_n abort mid-pair loses nothing.
+
+#### STATUS byte (during every command byte)
+
+| Bit | Meaning |
+|---|---|
+| 7 | RUN |
+| 6 | IRQ (same as the pin) |
+| 5 | RX_AVAIL |
+| 4 | TX_FULL |
+| 3 | ERR (sticky core) |
+| 2 | LINKERR |
+| 1 | 0 |
+| 0 | 1 |
+
+Bits 1:0 fixed so a host can detect a live chip vs floating/stuck MISO.
+
+#### Interrupt
+
+`IRQ = (IRQ_EN_RX & RX_AVAIL) | (IRQ_EN_ERR & (ERR | LINKERR))` — level,
+clears when the host drains RX or clears errors.
+
+#### Access rules
+
+| Situation | Behaviour |
+|---|---|
+| CFG_WRITE to enabled context | rejected, `ERR.CFG` |
+| IMEM_WRITE while owning context enabled | rejected, `LINKERR.IMEM_REJECTED` |
+| IMEM_READ while owning context enabled | rejected, `LINKERR.IMEM_REJECTED` (fetch port is shared) |
+| PUSH / PULL / status / shared regs | allowed running or not |
+| CS_n mid-byte | partial byte discarded |
+| CS_n mid multi-byte unit | unit discarded / entry kept; `LINKERR.ABORTED` |
+| Unknown command | ignore rest; `LINKERR.BADCMD` |
+| `rst_n` | link active; RUN=0; contexts disabled; pins inputs |
+
+`RUN` is **register-only** (`CTRL.RUN`); there is no RUN input pin (`uo[2]`
+mirrors it). CTRL writes take effect on CS_n rise so RUN does not start mid-frame.
+
+**SPI RUN → first execute (measured):** writing `CTRL.RUN=1` takes effect on the
+CS_n-rise that completes that CTRL frame. That same core-clock edge raises
+`uo[2]`. The **next** rising `clk` is the first core execute edge (sync snap of
+pin inputs + first instruction). ISS cycle 0 is that execute edge — one cycle
+after `uo[2]` rises (`UO_RUN_LEAD_CYCLES = 1` in the RTL harness). This is a
+fixed property of the SPI host link (the former parallel-bus RUN pin had a
+non-executing run-rise cycle instead).
 
 ### 2.1 Configuration registers
 
@@ -230,10 +332,15 @@ whether `CLK_EN` was set via the config map or `MTS ECFG`.
 
 #### Shared (`0x00`–`0x0F`)
 
-| Addr | Name | Bits | Reset | Meaning |
-|---|---|---|---|---|
-| `0x00` | ENABLE | `[1:0]` | 0 | Bit *i* enables context *i* |
-| `0x01`–`0x0F` | — | — | 0 | Reserved |
+| Addr | Name | Access | Bits / meaning |
+|---|---|---|---|
+| `0x00` | ENABLE | R/W | `[1:0]` context enables |
+| `0x01` | CTRL | R/W | bit 0 RUN; bit 1 SOFT_RESET (self-clearing: clears queues, FIFOs, PC, flags, pending events; keeps IMEM and configuration); bit 2 IRQ_EN_RX; bit 3 IRQ_EN_ERR |
+| `0x02` | TX_FREE | R | free entries in host → program FIFO (0–8) |
+| `0x03` | RX_COUNT | R | entries in program → host FIFO (0–8) |
+| `0x04` | LINKERR | R/W1C | bit 0 BADCMD, bit 1 OVERFLOW, bit 2 IMEM_REJECTED, bit 3 ABORTED |
+| `0x05` | ID | R | version / build ID |
+| `0x06`–`0x0F` | — | — | Reserved |
 
 #### Context block (ctx0 = `0x10`+off, ctx1 = `0x30`+off)
 
