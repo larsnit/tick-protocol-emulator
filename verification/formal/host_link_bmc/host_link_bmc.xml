@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <testsuites>
-<testsuite timestamp="2026-10-18T12:35:27" hostname="Mac" package="host_link" id="0" name="bmc" tests="7" errors="0" failures="0" time="5" skipped="0">
+<testsuite timestamp="2026-10-18T14:07:48" hostname="Mac" package="host_link" id="0" name="bmc" tests="7" errors="0" failures="0" time="4" skipped="0">
 <properties>
 <property name="os" value="Darwin"/>
 <property name="expect" value="PASS"/>
@@ -22,106 +22,106 @@
 </testcase>
 <testcase classname="bmc" name="Property ASSERT in host_link_formal_top at host_link_formal_top.sv:98.9-98.35" time="0" type="ASSERT" location="host_link_formal_top.sv:98.9-98.35" id="_witness_.check_assert_host_link_formal_top_sv_98_20">
 </testcase>
-<system-out>SBY 12:35:22 [host_link_bmc] Removing directory '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc'.
-SBY 12:35:22 [host_link_bmc] Copy '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/../../src/host_spi.sv' to '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc/src/host_spi.sv'.
-SBY 12:35:22 [host_link_bmc] Copy '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_formal_top.sv' to '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc/src/host_link_formal_top.sv'.
-SBY 12:35:22 [host_link_bmc] engine_0: smtbmc z3
-SBY 12:35:22 [host_link_bmc] base: starting process &quot;cd host_link_bmc/src; yosys -ql ../model/design.log ../model/design.ys&quot;
-SBY 12:35:22 [host_link_bmc] base: finished (returncode=0)
-SBY 12:35:22 [host_link_bmc] prep: starting process &quot;cd host_link_bmc/model; yosys -ql design_prep.log design_prep.ys&quot;
-SBY 12:35:22 [host_link_bmc] prep: finished (returncode=0)
-SBY 12:35:22 [host_link_bmc] smt2: starting process &quot;cd host_link_bmc/model; yosys -ql design_smt2.log design_smt2.ys&quot;
-SBY 12:35:22 [host_link_bmc] smt2: finished (returncode=0)
-SBY 12:35:22 [host_link_bmc] engine_0: starting process &quot;cd host_link_bmc; yosys-smtbmc -s z3 --presat --noprogress -t 40  --append 0 --dump-vcd engine_0/trace.vcd --dump-yw engine_0/trace.yw --dump-vlogtb engine_0/trace_tb.v --dump-smtc engine_0/trace.smtc model/design_smt2.smt2&quot;
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Solver: z3
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 0..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 0..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 1..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 1..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 2..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 2..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 3..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 3..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 4..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 4..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 5..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 5..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 6..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 6..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 7..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 7..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 8..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 8..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 9..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 9..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 10..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 10..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 11..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 11..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 12..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 12..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 13..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 13..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 14..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 14..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 15..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 15..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 16..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 16..
-SBY 12:35:22 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 17..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 17..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 18..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 18..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 19..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 19..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 20..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 20..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 21..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 21..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 22..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 22..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 23..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 23..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 24..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 24..
-SBY 12:35:23 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 25..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 25..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 26..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 26..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 27..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 27..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 28..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 28..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 29..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 29..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 30..
-SBY 12:35:24 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 30..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 31..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 31..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 32..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 32..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 33..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 33..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 34..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 34..
-SBY 12:35:25 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 35..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 35..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 36..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 36..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 37..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:04  Checking assertions in step 37..
-SBY 12:35:26 [host_link_bmc] engine_0: ##   0:00:04  Checking assumptions in step 38..
-SBY 12:35:27 [host_link_bmc] engine_0: ##   0:00:04  Checking assertions in step 38..
-SBY 12:35:27 [host_link_bmc] engine_0: ##   0:00:04  Checking assumptions in step 39..
-SBY 12:35:27 [host_link_bmc] engine_0: ##   0:00:04  Checking assertions in step 39..
-SBY 12:35:27 [host_link_bmc] engine_0: ##   0:00:04  Status: passed
-SBY 12:35:27 [host_link_bmc] engine_0: finished (returncode=0)
-SBY 12:35:27 [host_link_bmc] engine_0: Status returned by engine: pass
-SBY 12:35:27 [host_link_bmc] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:05 (5)
-SBY 12:35:27 [host_link_bmc] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:05 (5)
-SBY 12:35:27 [host_link_bmc] summary: engine_0 (smtbmc z3) returned pass
-SBY 12:35:27 [host_link_bmc] summary: engine_0 did not produce any traces
-SBY 12:35:27 [host_link_bmc] DONE (PASS, rc=0)
+<system-out>SBY 14:07:43 [host_link_bmc] Removing directory '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc'.
+SBY 14:07:43 [host_link_bmc] Copy '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/../../src/host_spi.sv' to '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc/src/host_spi.sv'.
+SBY 14:07:43 [host_link_bmc] Copy '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_formal_top.sv' to '/Users/larsnitschke/Documents/coding/janestreet_isa/verification/formal/host_link_bmc/src/host_link_formal_top.sv'.
+SBY 14:07:43 [host_link_bmc] engine_0: smtbmc z3
+SBY 14:07:43 [host_link_bmc] base: starting process &quot;cd host_link_bmc/src; yosys -ql ../model/design.log ../model/design.ys&quot;
+SBY 14:07:43 [host_link_bmc] base: finished (returncode=0)
+SBY 14:07:43 [host_link_bmc] prep: starting process &quot;cd host_link_bmc/model; yosys -ql design_prep.log design_prep.ys&quot;
+SBY 14:07:43 [host_link_bmc] prep: finished (returncode=0)
+SBY 14:07:43 [host_link_bmc] smt2: starting process &quot;cd host_link_bmc/model; yosys -ql design_smt2.log design_smt2.ys&quot;
+SBY 14:07:43 [host_link_bmc] smt2: finished (returncode=0)
+SBY 14:07:43 [host_link_bmc] engine_0: starting process &quot;cd host_link_bmc; yosys-smtbmc -s z3 --presat --noprogress -t 40  --append 0 --dump-vcd engine_0/trace.vcd --dump-yw engine_0/trace.yw --dump-vlogtb engine_0/trace_tb.v --dump-smtc engine_0/trace.smtc model/design_smt2.smt2&quot;
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Solver: z3
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 0..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 0..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 1..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 1..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 2..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 2..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 3..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 3..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 4..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 4..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 5..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 5..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 6..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 6..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 7..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 7..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 8..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 8..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 9..
+SBY 14:07:43 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 9..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 10..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 10..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 11..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 11..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 12..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 12..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 13..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 13..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 14..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 14..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 15..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 15..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 16..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 16..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 17..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 17..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 18..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 18..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 19..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 19..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 20..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 20..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 21..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 21..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 22..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 22..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 23..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assertions in step 23..
+SBY 14:07:44 [host_link_bmc] engine_0: ##   0:00:00  Checking assumptions in step 24..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 24..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 25..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 25..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 26..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 26..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 27..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 27..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 28..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assertions in step 28..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:01  Checking assumptions in step 29..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 29..
+SBY 14:07:45 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 30..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 30..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 31..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 31..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 32..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 32..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 33..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assertions in step 33..
+SBY 14:07:46 [host_link_bmc] engine_0: ##   0:00:02  Checking assumptions in step 34..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 34..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 35..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 35..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 36..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 36..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assumptions in step 37..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:03  Checking assertions in step 37..
+SBY 14:07:47 [host_link_bmc] engine_0: ##   0:00:04  Checking assumptions in step 38..
+SBY 14:07:48 [host_link_bmc] engine_0: ##   0:00:04  Checking assertions in step 38..
+SBY 14:07:48 [host_link_bmc] engine_0: ##   0:00:04  Checking assumptions in step 39..
+SBY 14:07:48 [host_link_bmc] engine_0: ##   0:00:04  Checking assertions in step 39..
+SBY 14:07:48 [host_link_bmc] engine_0: ##   0:00:04  Status: passed
+SBY 14:07:48 [host_link_bmc] engine_0: finished (returncode=0)
+SBY 14:07:48 [host_link_bmc] engine_0: Status returned by engine: pass
+SBY 14:07:48 [host_link_bmc] summary: Elapsed clock time [H:MM:SS (secs)]: 0:00:04 (4)
+SBY 14:07:48 [host_link_bmc] summary: Elapsed process time [H:MM:SS (secs)]: 0:00:04 (4)
+SBY 14:07:48 [host_link_bmc] summary: engine_0 (smtbmc z3) returned pass
+SBY 14:07:48 [host_link_bmc] summary: engine_0 did not produce any traces
+SBY 14:07:48 [host_link_bmc] DONE (PASS, rc=0)
 </system-out>
 <system-err>
 </system-err>

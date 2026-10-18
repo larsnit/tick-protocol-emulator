@@ -597,6 +597,6 @@ Module host_link_formal_top directly or indirectly contains formal properties ->
 6. Executing RTLIL backend.
 Output filename: ../model/design.il
 
-End of script. Logfile hash: 4778df7ed8, time: 0.05s, user: 0.05s, system: 0.00s, MEM: 24.45 MB peak
+End of script. Logfile hash: 4778df7ed8, time: 0.05s, user: 0.05s, system: 0.00s, MEM: 24.31 MB peak
 Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
 Time spent: 17% 2x hierarchy (0 sec), 17% 5x opt_clean (0 sec), ...

@@ -213,25 +213,45 @@ class Machine:
             mask &= ~(1 << ci)
         self.cfg_write(0x00, mask)
 
-    def _snap_inputs_after_enable(self) -> None:
-        """Match RTL RUN-rise: settle sync to idle drives; clear pending; no edge.
+    def _settle_pin_sync(self, cycles: int | None = None) -> None:
+        """Advance own-delay + sync/majority under current pads (models !run clocks).
 
-        Sync flops reset to 1; push-pull idle=0 then feeds the sample path and
-        would look like EDGE_FALL without this snap (RTL settles while !run and
-        clears pending / snaps lp_prev on RUN rise — docs/isa.md).
+        Only ``_sync0`` samples the pad path; ``_sync1`` / majority never load the
+        raw sample in one step. Edge history tracks the synchronised value each
+        cycle, matching RTL ``lp_prev <= lp_in`` while stopped.
+        """
+        n = _OWN_SAMPLE_DELAY + 4 if cycles is None else cycles
+        for _ in range(n):
+            levels = list(self._pin_sample)
+            self._sync_prev = list(self._sync1)
+            self._filt_prev = list(self._filt)
+            for p in range(8):
+                self._sync1[p] = self._sync0[p]
+                self._sync0[p] = levels[p] & 1
+                self._maj_hist[p] = [self._sync1[p]] + self._maj_hist[p][:2]
+                self._filt[p] = 1 if sum(self._maj_hist[p]) >= 2 else 0
+            self._pin_sample = self._sample_pins_for_sync()
+            self._shift_own_delay()
+
+    def _snap_inputs_after_enable(self) -> None:
+        """Match RTL RUN-rise: edge history from sync'd levels; pending clear.
+
+        The synchroniser chain is not force-loaded from the pad. Offline / just-
+        after-load paths settle under the current drives (continuous sync while
+        stopped); at the rise only edge history is latched to the synchronised
+        value (docs/isa.md).
         """
         self._apply_drives()
-        cur = [self.phys_drive[q] & 1 for q in range(8)]
+        # Own-drive delay settled under current OE/drive (clocks while !run).
+        cur = [
+            (self.phys_drive[p] & 1) if self.phys_oe[p] else 0 for p in range(8)
+        ]
         self._own_delay = [list(cur) for _ in self._own_delay]
         self._pin_sample = self._sample_pins_for_sync()
-        for p in range(8):
-            s = self._pin_sample[p] & 1
-            self._sync0[p] = s
-            self._sync1[p] = s
-            self._sync_prev[p] = s
-            self._maj_hist[p] = [s, s, s]
-            self._filt[p] = s
-            self._filt_prev[p] = s
+        self._settle_pin_sync()
+        # RUN rise: edge-history register only (synchronised, not pad).
+        self._sync_prev = list(self._sync1)
+        self._filt_prev = list(self._filt)
         for c in self.ctx:
             c.ev_pending = 0
         self._pin_trap_suppress = True

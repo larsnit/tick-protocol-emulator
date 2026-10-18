@@ -1,9 +1,10 @@
 """No phantom QUAL/EDGE trap the cycle after RUN rise (trial298 class).
 
 Symptom: fuzz trial298 cy1 RTL PC jumps to QUAL trap vector; ISS continues.
-Root cause: on RUN rise, lp_prev snapped to pre-snap lp_in while sync snapped
-to pin_raw — next cycle looked like QUAL_RISE. Fix: snap lp_prev to lp_snap
-(pin_raw mapped to LPs).
+Root cause: on RUN rise, edge history / sync were force-loaded from the pad
+while combo live still saw a transitional level — next cycle looked like
+QUAL_RISE. Fix: sync runs continuously; on RUN rise only lp_prev loads from
+synchronised lp_in.
 """
 
 from __future__ import annotations

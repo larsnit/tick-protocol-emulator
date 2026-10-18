@@ -218,38 +218,25 @@ module tick_core (
   wire [7:0] pin_raw;
   wire [3:0] lp_in;
 
-  // RUN rising: snap the whole sync/majority pipeline to pin_raw (ISS enable
-  // snap). Otherwise load-bus residue still in sync1/filt makes LEVEL_* traps
-  // fire before the post-run inputs have propagated.
-  reg run_q_sync;
-  wire run_rise_sync = internal_run & ~run_q_sync;
-
+  // Sync / majority run every clock, including while !run. Only sync0 samples
+  // the pad (via pin_raw); sync1 and maj* never load pin_raw. On RUN rise,
+  // tick_events loads edge-history from lp_in (synchronised), not the pad.
   always @(posedge clk or negedge exec_rst_n) begin
     if (!exec_rst_n) begin
-      own_d      <= 8'hFF;
-      sync0      <= 8'hFF;
-      sync1      <= 8'hFF;
-      maj0       <= 8'hFF;
-      maj1       <= 8'hFF;
-      maj2       <= 8'hFF;
-      run_q_sync <= 1'b0;
+      own_d <= 8'hFF;
+      sync0 <= 8'hFF;
+      sync1 <= 8'hFF;
+      maj0  <= 8'hFF;
+      maj1  <= 8'hFF;
+      maj2  <= 8'hFF;
     end else begin
-      run_q_sync <= internal_run;
       own_d <= q_uio_out_c;
-      if (run_rise_sync) begin
-        sync0 <= pin_raw;
-        sync1 <= pin_raw;
-        maj0  <= pin_raw;
-        maj1  <= pin_raw;
-        maj2  <= pin_raw;
-      end else begin
-        sync0 <= pin_raw;
-        sync1 <= sync0;
-        // maj0<=sync0: with NBA this equals new sync1 (ISS maj_hist[0]=sync1 after shift).
-        maj0  <= sync0;
-        maj1  <= maj0;
-        maj2  <= maj1;
-      end
+      sync0 <= pin_raw;
+      sync1 <= sync0;
+      // maj0<=sync0: with NBA this equals new sync1 (ISS maj_hist[0]=sync1 after shift).
+      maj0  <= sync0;
+      maj1  <= maj0;
+      maj2  <= maj1;
     end
   end
 
@@ -269,14 +256,6 @@ module tick_core (
   assign lp_in[1] = glitch[1] ? filt[pmap1_w] : sync1[pmap1_w];
   assign lp_in[2] = glitch[2] ? filt[pmap2_w] : sync1[pmap2_w];
   assign lp_in[3] = glitch[3] ? filt[pmap3_w] : sync1[pmap3_w];
-
-  // RUN-rise edge detector prev-sample: map pin_raw (sync snap target). Glitch
-  // majority of three identical samples is the sample itself.
-  wire [3:0] lp_snap;
-  assign lp_snap[0] = pin_raw[pmap0_w];
-  assign lp_snap[1] = pin_raw[pmap1_w];
-  assign lp_snap[2] = pin_raw[pmap2_w];
-  assign lp_snap[3] = pin_raw[pmap3_w];
 
   assign uio_out = q_uio_out;
   assign uio_oe  = q_uio_oe;
@@ -334,7 +313,6 @@ module tick_core (
       .rst_n(exec_rst_n),
       .run(internal_run),
       .lp_in(lp_in),
-      .lp_snap(lp_snap),
       .host_data(host_data),
       .host_space(host_space),
       .ev0_cfg(ev0_cfg),

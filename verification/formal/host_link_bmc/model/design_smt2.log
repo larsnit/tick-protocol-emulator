@@ -133,6 +133,6 @@ Module host_link_formal_top directly or indirectly contains formal properties ->
 Creating SMT-LIBv2 representation of module host_spi.
 Creating SMT-LIBv2 representation of module host_link_formal_top.
 
-End of script. Logfile hash: 5fdce7b6ed, time: 0.01s, user: 0.01s, system: 0.00s, MEM: 15.83 MB peak
+End of script. Logfile hash: 5fdce7b6ed, time: 0.01s, user: 0.01s, system: 0.00s, MEM: 15.77 MB peak
 Yosys 0.68+post (git sha1 c12172fbae8af5e20f6fb52e3d4e92d56ed587b6, Release, AppleClang clang++ 21.0.0.21000101)
-Time spent: 69% 2x write_smt2 (0 sec), 21% 2x read_rtlil (0 sec), ...
+Time spent: 68% 2x write_smt2 (0 sec), 21% 2x read_rtlil (0 sec), ...

@@ -7,9 +7,6 @@ module tick_events (
     input  wire        rst_n,
     input  wire        run,
     input  wire [3:0]  lp_in,
-    // Levels matching the sync snap target (pin_raw→LP). Used on RUN rise so
-    // lp_prev matches post-snap lp_in (pre-snap lp_in would invent EDGE/QUAL).
-    input  wire [3:0]  lp_snap,
     input  wire        host_data,
     input  wire        host_space,
     input  wire [7:0]  ev0_cfg,
@@ -104,9 +101,9 @@ module tick_events (
   assign ev_wait[3] = latched_w[3] ? (pending_q[3] | live_w[3]) : live_w[3];
 
   // Trap priority: lower event index wins; live edge (not pending).
-  // On RUN rise, suppress *pin* traps only: sync snaps that cycle but combo
-  // live can still see pre-snap load-bus levels. HOST_DATA / HOST_SPACE do not
-  // use the pin path and must still trap (ISS; fuzz trial26).
+  // On RUN rise, suppress *pin* traps only (combo live may still see a
+  // transitional synchronised level). HOST_DATA / HOST_SPACE do not use the
+  // pin path and must still trap (ISS; fuzz trial26).
   wire       run_rise = run & ~run_q;
   reg        trap_req_c;
   reg [5:0]  trap_vec_c;
@@ -140,12 +137,12 @@ module tick_events (
     end else begin
       run_q <= run;
       if (!run) begin
+        // Sync runs while stopped; keep edge history on the synchronised level.
         lp_prev_q  <= lp_in;
         pending_q  <= 4'h0;
       end else if (!run_q) begin
-        // Rising run: snap prev to lp_snap (same as sync's pin_raw target), not
-        // pre-snap lp_in — otherwise the next cycle sees a phantom EDGE/QUAL.
-        lp_prev_q  <= lp_snap;
+        // RUN rise: only edge history loads from synchronised lp_in (not pad).
+        lp_prev_q  <= lp_in;
         pending_q  <= 4'h0;
       end else begin
         lp_prev_q <= lp_in;

@@ -110,8 +110,12 @@ executable reference.
      tick is consumed, `EVF` gets both bits, and there's no MISS.
    - **(b) Timer stopped:** posting the wait entry starts the timer (rule 4).
    - **(c) Illegal:** TICK in the mask together with `tc = rearm` or `tc = idle`,
-     because those stop the timer the WAIT is waiting on. The assembler rejects
-     it; the ISS asserts.
+     because those encodings stop the timer the WAIT is waiting on. The
+     assembler rejects it; the ISS raises. If a program uses the encoding
+     anyway, the hardware does not trap: it posts the timed WAIT and issues
+     both the soft stop (`tc`) and the timed-post start; start wins after stop
+     in the same cycle so the timer keeps running, and when the wait completes
+     by tick the stored `tc` is applied as usual (`idle` stops, `rearm` rearms).
 
 **Consequences:**
 - While the timer is stopped, an empty host FIFO is just idle. While it runs, an
@@ -157,15 +161,19 @@ executable reference.
     when (1) a `WAIT` ends and reports that event in `EVF`, (2) the program
     writes 1 to that bit in `EVCLR` (SPR 14), or (3) **that event's** trap is
     taken (only that bit; other pending flags stay). Pending flags are also
-    cleared when **RUN rises** (host `ui[3]` 0→1). On that rising edge the
-    synchroniser / glitch-filter pipeline and the edge detectors' previous-sample
-    state all snap to the current pin levels, so load-bus traffic (and sync
-    settling from reset onto idle drives) while `RUN=0` cannot leave a stale
-    level, a phantom edge, or a pending flag for the first instruction. **Pin**
-    event traps (level / edge / qualified edge) are also suppressed on that
-    rising-RUN cycle (combo live still sees pre-snap levels); `HOST_DATA` and
-    `HOST_SPACE` traps are **not** suppressed — they do not use the pin path.
-    The ISS applies the same snap when a context enable bit rises.
+    cleared when **RUN rises** (host `ui[3]` 0→1). The pin synchroniser runs
+    every clock, including while `RUN=0`: only the first sync flop samples the
+    pad; the second sync flop and the glitch-filter history shift from the
+    prior sync stage and never load the raw pad. While stopped, and again on
+    the RUN rising edge, the edge detectors' previous-sample register loads
+    from the **synchronised** level (`lp_in`), so load-bus traffic while
+    `RUN=0` is filtered by the continuous sync chain and cannot leave a
+    phantom edge or a pending flag for the first instruction. **Pin** event
+    traps (level / edge / qualified edge) are also suppressed on that
+    rising-RUN cycle; `HOST_DATA` and `HOST_SPACE` traps are **not**
+    suppressed — they do not use the pin path. The ISS matches: sync settles
+    under the current pads, then only edge history is latched from the
+    synchronised value when a context enable bit rises.
   - Level events and host-data / host-space are never latched (they are levels).
   - Traps still fire from the live edge on the cycle it occurs; they do not wait
     on pending.

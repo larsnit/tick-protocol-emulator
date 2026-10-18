@@ -2,8 +2,10 @@
 
 Timeline (measured on this SPI host link):
   - CTRL.RUN is applied on CS_n rise → ``uo[2]`` rises that cycle.
-  - Core sync-snap / first execute are on the **next** rising ``clk`` edge
-    (``UO_RUN_LEAD_CYCLES`` = 1). See docs/isa.md.
+  - First execute (and RUN-rise edge-history latch from synchronised pins) is
+    on the **next** rising ``clk`` edge (``UO_RUN_LEAD_CYCLES`` = 1). See
+    docs/isa.md. Sync flops run every clock while stopped; they are not
+    force-loaded from the pad at RUN rise.
   - ISS cycle 0 = that first execute edge.
 
 Pad compares use the **registered** top-level ``uio_out`` / ``uio_oe`` (same as
@@ -52,10 +54,11 @@ async def start_run(host: HostLink, dut, iss: Machine | None = None):
     """Kick CTRL.RUN via SPI; return right after uo RUN rises.
 
     The next rising ``clk`` after a falling-edge pin setup is execute cycle 0.
-    If ``iss`` is given, snap its pin sync to match RTL run-rise.
+    If ``iss`` is given, latch its edge-history from the synchronised value
+    (RTL RUN-rise analogue).
 
     Caller must drive ``dut.uio_in`` to the intended pre-RUN pin vector *before*
-    calling this (RTL snaps pin sync on the first execute / run-rise edge).
+    calling this (RTL edge history loads from sync'd levels on run-rise).
     """
     task = cocotb.start_soon(host.run(settle="timer"))
     await await_run_rise(dut)
@@ -110,9 +113,10 @@ def rtl_pads(dut) -> tuple[int, int]:
     return out, oe
 
 
-# SPI vs tick-ref parallel bus: first post-RUN edge is snap+exec (tick-ref had a
-# non-exec run-rise). Discard that edge on both sides, then present ext one
-# cycle early on RTL so pin-edge ticks match ISS end-of-cycle capture.
+# SPI vs tick-ref parallel bus: first post-RUN edge is edge-hist latch+exec
+# (tick-ref had a non-exec run-rise). Discard that edge on both sides, then
+# present ext one cycle early on RTL so pin-edge ticks match ISS end-of-cycle
+# capture.
 SPI_EXEC_WARMUP = 1
 SPI_PIN_LEAD = 1
 
